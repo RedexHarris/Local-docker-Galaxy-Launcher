@@ -76,10 +76,51 @@ function Write-JsonArray {
 }
 
 function Get-InstalledRepositories {
+    param([switch]$Quiet)
+
     $key = [uri]::EscapeDataString($ApiKey)
     $installedUri = "$GalaxyUrl/api/tool_shed_repositories?key=$key"
-    Write-Host "Loading installed Galaxy Tool Shed repositories..."
+    if (-not $Quiet) {
+        Write-Host "Loading installed Galaxy Tool Shed repositories..."
+    }
     return ConvertTo-Array (Invoke-RestMethod -Uri $installedUri -UseBasicParsing -TimeoutSec 30)
+}
+
+function Get-RepositoryStatusText {
+    param([object]$Repository)
+
+    $values = @()
+    foreach ($propertyName in @("status", "tool_shed_status", "installation_status", "status_message", "error_message")) {
+        if ($Repository.PSObject.Properties.Name -contains $propertyName -and $Repository.$propertyName) {
+            $values += [string]$Repository.$propertyName
+        }
+    }
+    return ($values -join " ").Trim()
+}
+
+function Test-RepositoryFailed {
+    param([object]$Repository)
+
+    $status = Get-RepositoryStatusText -Repository $Repository
+    return [bool]($status -match "(?i)error|fail|failed")
+}
+
+function Test-RepositoryInstalled {
+    param([object]$Repository)
+
+    if ($Repository.uninstalled -or $Repository.deleted) {
+        return $false
+    }
+
+    if (Test-RepositoryFailed -Repository $Repository) {
+        return $false
+    }
+
+    if ($Repository.PSObject.Properties.Name -contains "status" -and $Repository.status) {
+        return ([string]$Repository.status) -match "(?i)^installed$|^ok$"
+    }
+
+    return $true
 }
 
 function Get-ActiveInstalledMap {
@@ -90,7 +131,7 @@ function Get-ActiveInstalledMap {
         if (-not $repository.name -or -not $repository.owner) {
             continue
         }
-        if ($repository.uninstalled -or $repository.deleted) {
+        if (-not (Test-RepositoryInstalled -Repository $repository)) {
             continue
         }
         $key = Get-ToolKey -Owner ([string]$repository.owner) -Name ([string]$repository.name)
@@ -100,6 +141,49 @@ function Get-ActiveInstalledMap {
         $map[$key] += $repository
     }
     return $map
+}
+
+function Wait-RepositoryInstalled {
+    param(
+        [object]$Tool,
+        [int]$TimeoutSec = 600,
+        [int]$PollSec = 5
+    )
+
+    $name = [string]$Tool.name
+    $owner = [string]$Tool.owner
+    $toolKey = Get-ToolKey -Owner $owner -Name $name
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $attempt = 0
+
+    while ((Get-Date) -lt $deadline) {
+        $installed = Get-InstalledRepositories -Quiet
+        $matches = ConvertTo-Array $installed | Where-Object {
+            $_.name -and $_.owner -and
+            (Get-ToolKey -Owner ([string]$_.owner) -Name ([string]$_.name)) -eq $toolKey
+        }
+
+        foreach ($repository in (ConvertTo-Array $matches)) {
+            if (Test-RepositoryFailed -Repository $repository) {
+                $status = Get-RepositoryStatusText -Repository $repository
+                throw "Galaxy reported a Tool Shed install failure for ${owner}/${name}: $status"
+            }
+        }
+
+        $ready = ConvertTo-Array $matches | Where-Object { Test-RepositoryInstalled -Repository $_ }
+        if ($ready) {
+            Write-Host "Repository installed and active: $owner/$name"
+            return $installed
+        }
+
+        $attempt++
+        if (($attempt % 6) -eq 1) {
+            Write-Host "Waiting for Galaxy to finish installing: $owner/$name"
+        }
+        Start-Sleep -Seconds $PollSec
+    }
+
+    throw "Timed out waiting for Galaxy to finish installing ${owner}/${name}."
 }
 
 function Get-MetadataByKey {
@@ -242,6 +326,8 @@ foreach ($tool in (ConvertTo-Array $selectedTools)) {
 
     $metadata = if ($metadataByKey.ContainsKey($toolKey)) { $metadataByKey[$toolKey] } else { $null }
     Invoke-InstallRepository -Tool $tool -Metadata $metadata
+    $installed = Wait-RepositoryInstalled -Tool $tool
+    $activeInstalledMap = Get-ActiveInstalledMap -Installed $installed
     $installedCount++
 }
 

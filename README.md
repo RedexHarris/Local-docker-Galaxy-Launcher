@@ -9,9 +9,11 @@
 - 使用 `quay.io/bgruening/galaxy:26.0` 作为基础镜像，并用官方 `install-tools` 方式扩展工具。
 - 用 Docker Compose 启动 Galaxy，Web 端口默认是 `http://localhost:8080`。
 - `/export` 挂载到命名卷 `local-usegalaxy_galaxy-export`，退出 Docker 或重启电脑后状态保留。
-- 提供 Windows GUI 应用程序启动器：检查 Docker、可选执行 `docker login`、首次构建镜像、后续直接启动容器、等待 Galaxy 就绪、打开登录页并自动关闭启动器。
+- 提供 Windows GUI 应用程序启动器：检查 Docker、首次构建镜像、后续直接启动容器、等待 Galaxy 就绪、打开登录页并自动关闭启动器。
 - 启动器、工具管理和日志窗口都不再依赖可见命令提示符窗口。
-- 提供工具管理界面：从 Galaxy Tool Shed 搜索官方工具仓库，勾选后通过 Galaxy 官方 API 增量安装，取消勾选后增量卸载。
+- 启动器会显示当前 Galaxy 容器状态，例如 `running`、`exited`、`starting`，Docker Compose 的正常状态进度不会再弹成错误。
+- 提供工具管理界面：从 Galaxy Tool Shed 搜索官方工具仓库，勾选并点击 `Save and apply` 后通过 Galaxy 官方 API 增量安装，取消勾选后增量卸载。
+- 提供 `Clear data` 清理功能：删除并 purge Galaxy 历史记录、数据集、输出文件，并取消仍在运行的任务；不删除已安装工具。
 - `tools.selected.json` 保存当前选择，`tool_list.yml` 由 `scripts/Update-ToolList.ps1` 从 Galaxy Tool Shed 拉取最新可安装 revision 生成。
 
 ## 默认登录信息
@@ -44,7 +46,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-Launcher.ps1
 
 第一次启动会拉取基础镜像、安装 Tool Shed 工具和 Conda 依赖，可能需要较长时间和较大磁盘空间。后续启动会复用已构建镜像和持久化数据。
 
-`quay.io/bgruening/galaxy:26.0` 是公开镜像，通常不需要 Docker Registry 登录。启动器里的 `Docker login` 只在你的网络或镜像源策略要求登录时使用；登录成功后启动器会自动关闭。
+如果启动器检测不到 Docker，会询问是否打开 Docker Desktop 下载页：https://www.docker.com/get-started/
 
 ## 自助添加或移除工具
 
@@ -53,10 +55,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-Launcher.ps1
 - 在搜索框输入工具名，例如 `kraken2` 或 `seqsero2`。
 - 点击 `Search Tool Shed`，界面会从 Galaxy Tool Shed 拉取匹配的官方仓库列表。
 - 勾选要加入 Galaxy 的工具；取消勾选已选工具，会从运行中的 Galaxy 卸载。
-- 点击 `Save selection` 只保存选择并重写 `tool_list.yml`。
+- 点击 `Save only` 只保存选择并重写 `tool_list.yml`，不会把工具安装进正在运行的 Galaxy。
 - 点击 `Save and apply` 会保存选择、启动容器，并通过 Galaxy API 只安装新增工具、只卸载取消勾选的工具。
 
 注意：首次镜像不存在时仍会构建一次，并按 `tool_list.yml` 安装当前选择的工具。之后工具选择变更不需要重建镜像，已安装且仍被勾选的工具不会重新下载安装；只有新增工具及其依赖会下载，取消勾选的工具会通过 Galaxy API 卸载。
+
+## 清理任务和文件
+
+启动器中点击 `Clear data` 会先二次确认，然后通过 Galaxy API 清理历史记录、数据集、输出文件，并取消仍在排队或运行的任务。这个功能不会调用 Tool Shed 仓库删除接口，也不会清空 Docker volume，因此已安装工具会保留。
+
+也可以先用 dry run 预览：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Clear-GalaxyData.ps1 -DryRun
+```
 
 ## 停止与保留状态
 

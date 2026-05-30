@@ -37,12 +37,14 @@ Assert-Path "scripts\Start-Galaxy.ps1"
 Assert-Path "scripts\Update-ToolList.ps1"
 Assert-Path "scripts\Manage-Tools.ps1"
 Assert-Path "scripts\Sync-GalaxyTools.ps1"
+Assert-Path "scripts\Clear-GalaxyData.ps1"
 
 Test-PowerShellSyntax "scripts\Start-Galaxy.ps1"
 Test-PowerShellSyntax "scripts\Build-Launcher.ps1"
 Test-PowerShellSyntax "scripts\Update-ToolList.ps1"
 Test-PowerShellSyntax "scripts\Manage-Tools.ps1"
 Test-PowerShellSyntax "scripts\Sync-GalaxyTools.ps1"
+Test-PowerShellSyntax "scripts\Clear-GalaxyData.ps1"
 
 if (Get-Command docker -ErrorAction SilentlyContinue) {
     & docker --version

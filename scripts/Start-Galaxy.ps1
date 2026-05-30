@@ -42,14 +42,14 @@ $AdminEmail = if ($Config.GALAXY_ADMIN_EMAIL) { $Config.GALAXY_ADMIN_EMAIL } els
 $AdminPassword = if ($Config.GALAXY_ADMIN_PASSWORD) { $Config.GALAXY_ADMIN_PASSWORD } else { "password" }
 $AdminApiKey = if ($Config.GALAXY_ADMIN_API_KEY) { $Config.GALAXY_ADMIN_API_KEY } else { "local-usegalaxy-admin-key" }
 $GalaxyImage = if ($Config.GALAXY_IMAGE) { $Config.GALAXY_IMAGE } else { "local-usegalaxy:latest" }
+$GalaxyContainerName = if ($Config.GALAXY_CONTAINER_NAME) { $Config.GALAXY_CONTAINER_NAME } else { "local-usegalaxy" }
+$DockerInstallUrl = "https://www.docker.com/get-started/"
 
 $script:LogBox = $null
 $script:StatusLabel = $null
+$script:ContainerStatusLabel = $null
 $script:ProgressBar = $null
 $script:Form = $null
-$script:RegistryBox = $null
-$script:RegistryUserBox = $null
-$script:RegistryPasswordBox = $null
 
 function Add-Log {
     param([string]$Message)
@@ -82,14 +82,23 @@ function Invoke-LoggedCommand {
     )
 
     Add-Log ("> {0} {1}" -f $File, ($Arguments -join " "))
-    $output = & $File @Arguments 2>&1
-    $exitCode = $LASTEXITCODE
-    foreach ($item in $output) {
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        # Docker Compose writes normal lifecycle progress to stderr. Capture it
+        # as command output so "Container ... Starting" is not treated as an error.
+        $ErrorActionPreference = "Continue"
+        $output = & $File @Arguments 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    foreach ($item in ($output | Where-Object { $_ })) {
         Add-Log ($item.ToString())
     }
     if ($exitCode -ne 0) {
         throw "Command failed with exit code ${exitCode}: $File $($Arguments -join ' ')"
     }
+    Update-ContainerStatus
 }
 
 function Test-Executable {
@@ -111,6 +120,48 @@ function Test-DockerDaemon {
     }
     & docker info *> $null
     return ($LASTEXITCODE -eq 0)
+}
+
+function Get-GalaxyContainerStatus {
+    if (-not (Test-Executable "docker")) {
+        return "Container: Docker not installed"
+    }
+    if (-not (Test-DockerDaemon)) {
+        return "Container: Docker not running"
+    }
+
+    $json = & docker inspect $GalaxyContainerName 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $json) {
+        return "Container: not created"
+    }
+
+    try {
+        $container = ($json | ConvertFrom-Json | Select-Object -First 1)
+        if (-not $container) {
+            return "Container: unknown"
+        }
+
+        $state = if ($container.State.Status) { [string]$container.State.Status } else { "unknown" }
+        $health = ""
+        if ($container.State.Health -and $container.State.Health.Status) {
+            $health = " / health: $($container.State.Health.Status)"
+        }
+        return "Container: $state$health"
+    } catch {
+        return "Container: unknown"
+    }
+}
+
+function Update-ContainerStatus {
+    if (-not $script:ContainerStatusLabel) {
+        return
+    }
+    try {
+        $script:ContainerStatusLabel.Text = Get-GalaxyContainerStatus
+    } catch {
+        $script:ContainerStatusLabel.Text = "Container: unknown"
+    }
+    [System.Windows.Forms.Application]::DoEvents()
 }
 
 function Invoke-Compose {
@@ -171,9 +222,29 @@ function Start-DockerDesktopIfAvailable {
     }
 }
 
+function Prompt-DockerInstall {
+    $message = "Docker was not found on this computer. Open $DockerInstallUrl now?"
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+        $result = [System.Windows.Forms.MessageBox]::Show(
+            $message,
+            "Docker not found",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Question
+        )
+        if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
+            Start-Process $DockerInstallUrl
+            Add-Log "Opened Docker download page: $DockerInstallUrl"
+        }
+    } catch {
+        Add-Log "Docker is not installed. Download page: $DockerInstallUrl"
+    }
+}
+
 function Ensure-DockerReady {
     if (-not (Test-Executable "docker")) {
-        throw "Docker CLI was not found. Install Docker Desktop or Docker Engine first."
+        Prompt-DockerInstall
+        throw "Docker CLI was not found. Install Docker Desktop or Docker Engine, then reopen this launcher."
     }
 
     if (Test-DockerDaemon) {
@@ -210,10 +281,12 @@ function Update-ToolListIfNeeded {
 function Wait-GalaxyReady {
     Set-Status "Waiting for Galaxy to become ready..."
     for ($i = 1; $i -le 180; $i++) {
+        Update-ContainerStatus
         try {
             $response = Invoke-WebRequest -Uri "$GalaxyUrl/api/version" -UseBasicParsing -TimeoutSec 5
             if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 500) {
                 Set-Status "Galaxy is ready."
+                Update-ContainerStatus
                 return
             }
         } catch {
@@ -237,6 +310,7 @@ function Wait-GalaxyReady {
 }
 
 function Open-Galaxy {
+    Update-ContainerStatus
     Set-Status "Opening Galaxy login page..."
     try {
         if ($script:Form) {
@@ -300,56 +374,6 @@ function Sync-SelectedToolsIfNeeded {
     }
 }
 
-function Invoke-DockerRegistryLogin {
-    if (-not $script:RegistryUserBox -or -not $script:RegistryPasswordBox) {
-        throw "Docker login fields are not available."
-    }
-
-    $registry = if ($script:RegistryBox.Text.Trim()) { $script:RegistryBox.Text.Trim() } else { "docker.io" }
-    $username = $script:RegistryUserBox.Text.Trim()
-    $password = $script:RegistryPasswordBox.Text
-
-    if (-not $username -or -not $password) {
-        throw "Enter a Docker registry username and password or token."
-    }
-
-    Ensure-DockerReady
-    Set-Status "Logging in to Docker registry..."
-
-    $psi = [System.Diagnostics.ProcessStartInfo]::new()
-    $psi.FileName = "docker"
-    $psi.Arguments = "login $registry --username $username --password-stdin"
-    $psi.UseShellExecute = $false
-    $psi.RedirectStandardInput = $true
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.CreateNoWindow = $true
-
-    $process = [System.Diagnostics.Process]::Start($psi)
-    $process.StandardInput.WriteLine($password)
-    $process.StandardInput.Close()
-    $stdout = $process.StandardOutput.ReadToEnd()
-    $stderr = $process.StandardError.ReadToEnd()
-    $process.WaitForExit()
-
-    if ($stdout) {
-        $stdout -split "`r?`n" | Where-Object { $_ } | ForEach-Object { Add-Log $_ }
-    }
-    if ($stderr) {
-        $stderr -split "`r?`n" | Where-Object { $_ } | ForEach-Object { Add-Log $_ }
-    }
-
-    if ($process.ExitCode -ne 0) {
-        throw "Docker login failed with exit code $($process.ExitCode)."
-    }
-
-    Set-Status "Docker login succeeded. Closing launcher."
-    if ($script:Form) {
-        Start-Sleep -Seconds 1
-        $script:Form.Close()
-    }
-}
-
 function Start-Galaxy {
     if ($script:ProgressBar) {
         $script:ProgressBar.Style = "Marquee"
@@ -360,6 +384,7 @@ function Start-Galaxy {
         Ensure-GalaxyImage
         Set-Status "Starting Galaxy without rebuilding the image..."
         Invoke-Compose @("up", "-d", "--no-build")
+        Update-ContainerStatus
         Wait-GalaxyReady
         Sync-SelectedToolsIfNeeded
         Open-Galaxy
@@ -386,7 +411,66 @@ function Stop-Galaxy {
         Ensure-DockerReady
         Set-Status "Stopping Galaxy container. The persistent volume is kept."
         Invoke-Compose @("stop")
+        Update-ContainerStatus
         Set-Status "Galaxy container stopped."
+    } catch {
+        Set-Status "Error: $($_.Exception.Message)"
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Local Galaxy Launcher", "OK", "Error") | Out-Null
+    } finally {
+        if ($script:ProgressBar) {
+            $script:ProgressBar.Style = "Blocks"
+        }
+    }
+}
+
+function Clear-GalaxyData {
+    $message = "This will delete and purge Galaxy histories, datasets, outputs, and cancel active jobs. Installed tools will be kept. Continue?"
+    $result = [System.Windows.Forms.MessageBox]::Show(
+        $message,
+        "Clear Galaxy Data",
+        [System.Windows.Forms.MessageBoxButtons]::YesNo,
+        [System.Windows.Forms.MessageBoxIcon]::Warning
+    )
+    if ($result -ne [System.Windows.Forms.DialogResult]::Yes) {
+        Set-Status "Galaxy data cleanup cancelled."
+        return
+    }
+
+    if ($script:ProgressBar) {
+        $script:ProgressBar.Style = "Marquee"
+    }
+    try {
+        Ensure-DockerReady
+        if (-not (Test-DockerImage -ImageName $GalaxyImage)) {
+            throw "Galaxy image was not found. Start Galaxy once before clearing data."
+        }
+
+        Set-Status "Starting Galaxy for data cleanup..."
+        Invoke-Compose @("up", "-d", "--no-build")
+        Update-ContainerStatus
+        Wait-GalaxyReady
+
+        Set-Status "Clearing Galaxy histories, jobs, and files..."
+        $scriptPath = Join-Path $PSScriptRoot "Clear-GalaxyData.ps1"
+        Invoke-LoggedCommand -File "powershell" -Arguments @(
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            $scriptPath,
+            "-GalaxyUrl",
+            $GalaxyUrl,
+            "-ApiKey",
+            $AdminApiKey
+        )
+
+        Set-Status "Galaxy data cleanup complete. Installed tools were kept."
+        [System.Windows.Forms.MessageBox]::Show(
+            "Galaxy histories, job outputs, and files were cleaned. Installed tools were kept.",
+            "Local Galaxy Launcher",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information
+        ) | Out-Null
     } catch {
         Set-Status "Error: $($_.Exception.Message)"
         [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Local Galaxy Launcher", "OK", "Error") | Out-Null
@@ -513,7 +597,7 @@ $form = [System.Windows.Forms.Form]::new()
 $script:Form = $form
 $form.Text = "Local Galaxy Launcher"
 $form.StartPosition = "CenterScreen"
-$form.ClientSize = [System.Drawing.Size]::new(760, 540)
+$form.ClientSize = [System.Drawing.Size]::new(760, 520)
 $form.FormBorderStyle = "FixedSingle"
 $form.MaximizeBox = $false
 
@@ -538,75 +622,57 @@ $status.Text = "Ready."
 $status.Font = [System.Drawing.Font]::new("Segoe UI", 10)
 $status.AutoSize = $false
 $status.Location = [System.Drawing.Point]::new(22, 84)
-$status.Size = [System.Drawing.Size]::new(660, 24)
+$status.Size = [System.Drawing.Size]::new(700, 24)
 $form.Controls.Add($status)
 
 $progress = [System.Windows.Forms.ProgressBar]::new()
 $script:ProgressBar = $progress
 $progress.Location = [System.Drawing.Point]::new(24, 114)
-$progress.Size = [System.Drawing.Size]::new(660, 18)
+$progress.Size = [System.Drawing.Size]::new(700, 18)
 $progress.Style = "Blocks"
 $form.Controls.Add($progress)
 
-$registryLabel = [System.Windows.Forms.Label]::new()
-$registryLabel.Text = "Optional Docker registry login: registry, username, password/token"
-$registryLabel.Font = [System.Drawing.Font]::new("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-$registryLabel.AutoSize = $true
-$registryLabel.Location = [System.Drawing.Point]::new(24, 148)
-$form.Controls.Add($registryLabel)
-
-$registryBox = [System.Windows.Forms.TextBox]::new()
-$script:RegistryBox = $registryBox
-$registryBox.Text = "docker.io"
-$registryBox.Location = [System.Drawing.Point]::new(24, 174)
-$registryBox.Size = [System.Drawing.Size]::new(150, 24)
-$form.Controls.Add($registryBox)
-
-$registryUserBox = [System.Windows.Forms.TextBox]::new()
-$script:RegistryUserBox = $registryUserBox
-$registryUserBox.Location = [System.Drawing.Point]::new(186, 174)
-$registryUserBox.Size = [System.Drawing.Size]::new(160, 24)
-$form.Controls.Add($registryUserBox)
-
-$registryPasswordBox = [System.Windows.Forms.TextBox]::new()
-$script:RegistryPasswordBox = $registryPasswordBox
-$registryPasswordBox.Location = [System.Drawing.Point]::new(358, 174)
-$registryPasswordBox.Size = [System.Drawing.Size]::new(160, 24)
-$registryPasswordBox.UseSystemPasswordChar = $true
-$form.Controls.Add($registryPasswordBox)
-
-$dockerLoginButton = [System.Windows.Forms.Button]::new()
-$dockerLoginButton.Text = "Docker login"
-$dockerLoginButton.Location = [System.Drawing.Point]::new(530, 171)
-$dockerLoginButton.Size = [System.Drawing.Size]::new(112, 30)
-$dockerLoginButton.Add_Click({
-    try {
-        Invoke-DockerRegistryLogin
-    } catch {
-        Set-Status "Error: $($_.Exception.Message)"
-        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Local Galaxy Launcher", "OK", "Error") | Out-Null
-    }
-})
-$form.Controls.Add($dockerLoginButton)
+$containerStatus = [System.Windows.Forms.Label]::new()
+$script:ContainerStatusLabel = $containerStatus
+$containerStatus.Text = "Container: checking..."
+$containerStatus.Font = [System.Drawing.Font]::new("Segoe UI", 9)
+$containerStatus.AutoSize = $false
+$containerStatus.Location = [System.Drawing.Point]::new(24, 136)
+$containerStatus.Size = [System.Drawing.Size]::new(700, 20)
+$form.Controls.Add($containerStatus)
 
 $startButton = [System.Windows.Forms.Button]::new()
 $startButton.Text = "Start and open login"
-$startButton.Location = [System.Drawing.Point]::new(24, 218)
-$startButton.Size = [System.Drawing.Size]::new(150, 34)
+$startButton.Location = [System.Drawing.Point]::new(24, 166)
+$startButton.Size = [System.Drawing.Size]::new(160, 34)
 $startButton.Add_Click({ Start-Galaxy })
 $form.Controls.Add($startButton)
 
 $openButton = [System.Windows.Forms.Button]::new()
 $openButton.Text = "Open Galaxy"
-$openButton.Location = [System.Drawing.Point]::new(186, 218)
+$openButton.Location = [System.Drawing.Point]::new(196, 166)
 $openButton.Size = [System.Drawing.Size]::new(120, 34)
 $openButton.Add_Click({ Open-Galaxy })
 $form.Controls.Add($openButton)
 
+$stopButton = [System.Windows.Forms.Button]::new()
+$stopButton.Text = "Stop"
+$stopButton.Location = [System.Drawing.Point]::new(328, 166)
+$stopButton.Size = [System.Drawing.Size]::new(80, 34)
+$stopButton.Add_Click({ Stop-Galaxy })
+$form.Controls.Add($stopButton)
+
+$clearDataButton = [System.Windows.Forms.Button]::new()
+$clearDataButton.Text = "Clear data"
+$clearDataButton.Location = [System.Drawing.Point]::new(420, 166)
+$clearDataButton.Size = [System.Drawing.Size]::new(130, 34)
+$clearDataButton.Add_Click({ Clear-GalaxyData })
+$form.Controls.Add($clearDataButton)
+
 $refreshButton = [System.Windows.Forms.Button]::new()
 $refreshButton.Text = "Refresh tools"
-$refreshButton.Location = [System.Drawing.Point]::new(318, 218)
-$refreshButton.Size = [System.Drawing.Size]::new(120, 34)
+$refreshButton.Location = [System.Drawing.Point]::new(24, 210)
+$refreshButton.Size = [System.Drawing.Size]::new(130, 34)
 $refreshButton.Add_Click({
     $script:RefreshTools = $true
     try {
@@ -621,31 +687,24 @@ $refreshButton.Add_Click({
 })
 $form.Controls.Add($refreshButton)
 
-$stopButton = [System.Windows.Forms.Button]::new()
-$stopButton.Text = "Stop"
-$stopButton.Location = [System.Drawing.Point]::new(450, 218)
-$stopButton.Size = [System.Drawing.Size]::new(90, 34)
-$stopButton.Add_Click({ Stop-Galaxy })
-$form.Controls.Add($stopButton)
+$toolsButton = [System.Windows.Forms.Button]::new()
+$toolsButton.Text = "Tools"
+$toolsButton.Location = [System.Drawing.Point]::new(166, 210)
+$toolsButton.Size = [System.Drawing.Size]::new(90, 34)
+$toolsButton.Add_Click({ Open-ToolManager })
+$form.Controls.Add($toolsButton)
 
 $logsButton = [System.Windows.Forms.Button]::new()
 $logsButton.Text = "Logs"
-$logsButton.Location = [System.Drawing.Point]::new(552, 218)
+$logsButton.Location = [System.Drawing.Point]::new(268, 210)
 $logsButton.Size = [System.Drawing.Size]::new(90, 34)
 $logsButton.Add_Click({ Open-LogsWindow })
 $form.Controls.Add($logsButton)
 
-$toolsButton = [System.Windows.Forms.Button]::new()
-$toolsButton.Text = "Tools"
-$toolsButton.Location = [System.Drawing.Point]::new(648, 218)
-$toolsButton.Size = [System.Drawing.Size]::new(70, 34)
-$toolsButton.Add_Click({ Open-ToolManager })
-$form.Controls.Add($toolsButton)
-
 $logBox = [System.Windows.Forms.TextBox]::new()
 $script:LogBox = $logBox
-$logBox.Location = [System.Drawing.Point]::new(24, 268)
-$logBox.Size = [System.Drawing.Size]::new(660, 220)
+$logBox.Location = [System.Drawing.Point]::new(24, 260)
+$logBox.Size = [System.Drawing.Size]::new(700, 195)
 $logBox.Multiline = $true
 $logBox.ScrollBars = "Vertical"
 $logBox.ReadOnly = $true
@@ -656,9 +715,30 @@ $footer = [System.Windows.Forms.Label]::new()
 $footer.Text = "Persistent Docker volume: local-usegalaxy_galaxy-export. Do not remove it if you want to keep state."
 $footer.Font = [System.Drawing.Font]::new("Segoe UI", 8)
 $footer.AutoSize = $false
-$footer.Location = [System.Drawing.Point]::new(24, 500)
-$footer.Size = [System.Drawing.Size]::new(660, 20)
+$footer.Location = [System.Drawing.Point]::new(24, 474)
+$footer.Size = [System.Drawing.Size]::new(700, 20)
 $form.Controls.Add($footer)
+
+$containerTimer = [System.Windows.Forms.Timer]::new()
+$containerTimer.Interval = 5000
+$containerTimer.Add_Tick({ Update-ContainerStatus })
+$containerTimer.Start()
+
+$form.Add_Shown({
+    try {
+        if (-not (Test-Executable "docker")) {
+            Set-Status "Docker CLI was not found."
+            Prompt-DockerInstall
+        } elseif (Test-DockerDaemon) {
+            Set-Status "Docker is ready."
+        } else {
+            Set-Status "Docker is installed. Click Start and open login to start Docker and Galaxy."
+        }
+        Update-ContainerStatus
+    } catch {
+        Add-Log "Docker startup check failed: $($_.Exception.Message)"
+    }
+})
 
 Add-Log "Project root: $ProjectRoot"
 Add-Log "Galaxy URL: $GalaxyUrl"

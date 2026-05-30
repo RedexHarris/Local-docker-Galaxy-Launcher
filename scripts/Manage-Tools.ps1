@@ -385,19 +385,19 @@ function Apply-ToolChanges {
     Add-Log "Starting Galaxy without rebuilding the image..."
     Invoke-Compose @("up", "-d", "--no-build")
     Wait-GalaxyReady
-    try {
-        $syncScript = Join-Path $PSScriptRoot "Sync-GalaxyTools.ps1"
-        $config = Read-DotEnv
-        $port = if ($config.GALAXY_PORT) { $config.GALAXY_PORT } else { "8080" }
-        $apiKey = if ($config.GALAXY_ADMIN_API_KEY) { $config.GALAXY_ADMIN_API_KEY } else { "local-usegalaxy-admin-key" }
-        $galaxyUrl = "http://localhost:$port"
-        $metadataPath = Join-Path $ProjectRoot "tool_list.metadata.json"
-        & powershell -NoProfile -ExecutionPolicy Bypass -File $syncScript -GalaxyUrl $galaxyUrl -ApiKey $apiKey -SelectionPath $SelectionPath -MetadataPath $metadataPath -RemovedPath $RemovedPath 2>&1 | ForEach-Object {
-            Add-Log ($_.ToString())
-        }
-    } catch {
-        Add-Log "Tool sync can be retried by the main launcher: $($_.Exception.Message)"
+    $syncScript = Join-Path $PSScriptRoot "Sync-GalaxyTools.ps1"
+    $config = Read-DotEnv
+    $port = if ($config.GALAXY_PORT) { $config.GALAXY_PORT } else { "8080" }
+    $apiKey = if ($config.GALAXY_ADMIN_API_KEY) { $config.GALAXY_ADMIN_API_KEY } else { "local-usegalaxy-admin-key" }
+    $galaxyUrl = "http://localhost:$port"
+    $metadataPath = Join-Path $ProjectRoot "tool_list.metadata.json"
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $syncScript -GalaxyUrl $galaxyUrl -ApiKey $apiKey -SelectionPath $SelectionPath -MetadataPath $metadataPath -RemovedPath $RemovedPath 2>&1 | ForEach-Object {
+        Add-Log ($_.ToString())
     }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Sync-GalaxyTools.ps1 failed. See tool-manager.log for details."
+    }
+    Add-Log "Tool changes were applied. Refresh the Galaxy browser tab if it was already open."
 }
 
 try {
@@ -424,7 +424,7 @@ $title.Location = [System.Drawing.Point]::new(18, 16)
 $form.Controls.Add($title)
 
 $hint = [System.Windows.Forms.Label]::new()
-$hint.Text = "Search official Tool Shed repositories, check tools to install, uncheck selected tools to remove from running Galaxy."
+$hint.Text = "Search Tool Shed, check tools, then use Save and apply to install/remove them in the running Galaxy."
 $hint.Font = [System.Drawing.Font]::new("Segoe UI", 9)
 $hint.AutoSize = $false
 $hint.Location = [System.Drawing.Point]::new(20, 50)
@@ -453,12 +453,13 @@ $searchButton.Add_Click({
 $form.Controls.Add($searchButton)
 
 $saveButton = [System.Windows.Forms.Button]::new()
-$saveButton.Text = "Save selection"
+$saveButton.Text = "Save only"
 $saveButton.Location = [System.Drawing.Point]::new(506, 80)
-$saveButton.Size = [System.Drawing.Size]::new(130, 30)
+$saveButton.Size = [System.Drawing.Size]::new(110, 30)
 $saveButton.Add_Click({
     try {
         Save-Selection
+        Add-Log "Saved locally only. Click Save and apply to install or remove tools in Galaxy."
     } catch {
         Add-Log "Error: $($_.Exception.Message)"
         [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Galaxy Tool Manager", "OK", "Error") | Out-Null
@@ -468,8 +469,8 @@ $form.Controls.Add($saveButton)
 
 $applyButton = [System.Windows.Forms.Button]::new()
 $applyButton.Text = "Save and apply"
-$applyButton.Location = [System.Drawing.Point]::new(648, 80)
-$applyButton.Size = [System.Drawing.Size]::new(140, 30)
+$applyButton.Location = [System.Drawing.Point]::new(628, 80)
+$applyButton.Size = [System.Drawing.Size]::new(150, 30)
 $applyButton.Add_Click({
     try {
         Apply-ToolChanges
@@ -482,7 +483,7 @@ $form.Controls.Add($applyButton)
 
 $closeButton = [System.Windows.Forms.Button]::new()
 $closeButton.Text = "Close"
-$closeButton.Location = [System.Drawing.Point]::new(800, 80)
+$closeButton.Location = [System.Drawing.Point]::new(790, 80)
 $closeButton.Size = [System.Drawing.Size]::new(110, 30)
 $closeButton.Add_Click({ $form.Close() })
 $form.Controls.Add($closeButton)
