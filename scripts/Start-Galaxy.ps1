@@ -367,7 +367,8 @@ function Sync-SelectedToolsIfNeeded {
             "-MetadataPath",
             (Join-Path $ProjectRoot "tool_list.metadata.json"),
             "-RemovedPath",
-            $RemovedToolsFile
+            $RemovedToolsFile,
+            "-ReconcileInstalledWithSelection"
         )
     } catch {
         Add-Log "Tool sync failed and can be retried from Tools: $($_.Exception.Message)"
@@ -669,34 +670,16 @@ $clearDataButton.Size = [System.Drawing.Size]::new(130, 34)
 $clearDataButton.Add_Click({ Clear-GalaxyData })
 $form.Controls.Add($clearDataButton)
 
-$refreshButton = [System.Windows.Forms.Button]::new()
-$refreshButton.Text = "Refresh tools"
-$refreshButton.Location = [System.Drawing.Point]::new(24, 210)
-$refreshButton.Size = [System.Drawing.Size]::new(130, 34)
-$refreshButton.Add_Click({
-    $script:RefreshTools = $true
-    try {
-        Update-ToolListIfNeeded
-        Set-Status "Tool list refreshed. Use Tools to apply changes incrementally."
-    } catch {
-        Set-Status "Error: $($_.Exception.Message)"
-        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Local Galaxy Launcher", "OK", "Error") | Out-Null
-    } finally {
-        $script:RefreshTools = $false
-    }
-})
-$form.Controls.Add($refreshButton)
-
 $toolsButton = [System.Windows.Forms.Button]::new()
 $toolsButton.Text = "Tools"
-$toolsButton.Location = [System.Drawing.Point]::new(166, 210)
+$toolsButton.Location = [System.Drawing.Point]::new(24, 210)
 $toolsButton.Size = [System.Drawing.Size]::new(90, 34)
 $toolsButton.Add_Click({ Open-ToolManager })
 $form.Controls.Add($toolsButton)
 
 $logsButton = [System.Windows.Forms.Button]::new()
 $logsButton.Text = "Logs"
-$logsButton.Location = [System.Drawing.Point]::new(268, 210)
+$logsButton.Location = [System.Drawing.Point]::new(126, 210)
 $logsButton.Size = [System.Drawing.Size]::new(90, 34)
 $logsButton.Add_Click({ Open-LogsWindow })
 $form.Controls.Add($logsButton)

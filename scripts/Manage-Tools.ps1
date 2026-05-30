@@ -239,7 +239,7 @@ function Search-OfficialTools {
 
 function Save-Selection {
     $script:Grid.EndEdit()
-    $previousSelection = ConvertTo-Array (Read-SelectedTools)
+    $previousSelection = @(ConvertTo-Array (Read-SelectedTools))
     $previousByKey = @{}
     foreach ($tool in $previousSelection) {
         if ($tool.name -and $tool.owner) {
@@ -272,6 +272,17 @@ function Save-Selection {
         $selectedByKey[(Get-Key -Owner $owner -Name $name)] = $tool
     }
 
+    $pendingRemoved = @(ConvertTo-Array (Read-PendingRemovedTools))
+    foreach ($key in $previousByKey.Keys) {
+        if (-not $selectedByKey.ContainsKey($key)) {
+            $pendingRemoved += @($previousByKey[$key])
+        }
+    }
+    $pendingRemoved = @($pendingRemoved | Where-Object {
+        $_.name -and $_.owner -and -not $selectedByKey.ContainsKey((Get-Key -Owner ([string]$_.owner) -Name ([string]$_.name)))
+    })
+    Write-PendingRemovedTools -Tools $pendingRemoved
+
     $selected = $selected | Sort-Object owner, name -Unique
     $json = $selected | ConvertTo-Json -Depth 6
     if (-not $json) {
@@ -279,17 +290,6 @@ function Save-Selection {
     }
     [System.IO.File]::WriteAllText($SelectionPath, $json + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
     Add-Log ("Saved {0} selected tools." -f (ConvertTo-Array $selected).Count)
-
-    $pendingRemoved = ConvertTo-Array (Read-PendingRemovedTools)
-    foreach ($key in $previousByKey.Keys) {
-        if (-not $selectedByKey.ContainsKey($key)) {
-            $pendingRemoved += $previousByKey[$key]
-        }
-    }
-    $pendingRemoved = $pendingRemoved | Where-Object {
-        $_.name -and $_.owner -and -not $selectedByKey.ContainsKey((Get-Key -Owner ([string]$_.owner) -Name ([string]$_.name)))
-    }
-    Write-PendingRemovedTools -Tools $pendingRemoved
 
     $scriptPath = Join-Path $PSScriptRoot "Update-ToolList.ps1"
     Add-Log "Regenerating tool_list.yml..."
@@ -315,16 +315,32 @@ function Invoke-Compose {
         if (Test-Executable "docker") {
             & docker compose version *> $null
             if ($LASTEXITCODE -eq 0) {
-                & docker compose @Arguments 2>&1 | ForEach-Object { Add-Log ($_.ToString()) }
-                if ($LASTEXITCODE -ne 0) {
+                $previousErrorActionPreference = $ErrorActionPreference
+                try {
+                    $ErrorActionPreference = "Continue"
+                    $output = & docker compose @Arguments 2>&1
+                    $exitCode = $LASTEXITCODE
+                } finally {
+                    $ErrorActionPreference = $previousErrorActionPreference
+                }
+                $output | Where-Object { $_ } | ForEach-Object { Add-Log ($_.ToString()) }
+                if ($exitCode -ne 0) {
                     throw "docker compose failed."
                 }
                 return
             }
         }
         if (Test-Executable "docker-compose") {
-            & docker-compose @Arguments 2>&1 | ForEach-Object { Add-Log ($_.ToString()) }
-            if ($LASTEXITCODE -ne 0) {
+            $previousErrorActionPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = "Continue"
+                $output = & docker-compose @Arguments 2>&1
+                $exitCode = $LASTEXITCODE
+            } finally {
+                $ErrorActionPreference = $previousErrorActionPreference
+            }
+            $output | Where-Object { $_ } | ForEach-Object { Add-Log ($_.ToString()) }
+            if ($exitCode -ne 0) {
                 throw "docker-compose failed."
             }
             return
@@ -391,7 +407,7 @@ function Apply-ToolChanges {
     $apiKey = if ($config.GALAXY_ADMIN_API_KEY) { $config.GALAXY_ADMIN_API_KEY } else { "local-usegalaxy-admin-key" }
     $galaxyUrl = "http://localhost:$port"
     $metadataPath = Join-Path $ProjectRoot "tool_list.metadata.json"
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $syncScript -GalaxyUrl $galaxyUrl -ApiKey $apiKey -SelectionPath $SelectionPath -MetadataPath $metadataPath -RemovedPath $RemovedPath 2>&1 | ForEach-Object {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $syncScript -GalaxyUrl $galaxyUrl -ApiKey $apiKey -SelectionPath $SelectionPath -MetadataPath $metadataPath -RemovedPath $RemovedPath -ReconcileInstalledWithSelection 2>&1 | ForEach-Object {
         Add-Log ($_.ToString())
     }
     if ($LASTEXITCODE -ne 0) {
@@ -424,7 +440,7 @@ $title.Location = [System.Drawing.Point]::new(18, 16)
 $form.Controls.Add($title)
 
 $hint = [System.Windows.Forms.Label]::new()
-$hint.Text = "Search Tool Shed, check tools, then use Save and apply to install/remove them in the running Galaxy."
+$hint.Text = "Search Tool Shed, check tools to keep, then apply changes to install checked tools and remove unchecked tools."
 $hint.Font = [System.Drawing.Font]::new("Segoe UI", 9)
 $hint.AutoSize = $false
 $hint.Location = [System.Drawing.Point]::new(20, 50)
@@ -452,24 +468,9 @@ $searchButton.Add_Click({
 })
 $form.Controls.Add($searchButton)
 
-$saveButton = [System.Windows.Forms.Button]::new()
-$saveButton.Text = "Save only"
-$saveButton.Location = [System.Drawing.Point]::new(506, 80)
-$saveButton.Size = [System.Drawing.Size]::new(110, 30)
-$saveButton.Add_Click({
-    try {
-        Save-Selection
-        Add-Log "Saved locally only. Click Save and apply to install or remove tools in Galaxy."
-    } catch {
-        Add-Log "Error: $($_.Exception.Message)"
-        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Galaxy Tool Manager", "OK", "Error") | Out-Null
-    }
-})
-$form.Controls.Add($saveButton)
-
 $applyButton = [System.Windows.Forms.Button]::new()
-$applyButton.Text = "Save and apply"
-$applyButton.Location = [System.Drawing.Point]::new(628, 80)
+$applyButton.Text = "Apply changes"
+$applyButton.Location = [System.Drawing.Point]::new(506, 80)
 $applyButton.Size = [System.Drawing.Size]::new(150, 30)
 $applyButton.Add_Click({
     try {
@@ -483,7 +484,7 @@ $form.Controls.Add($applyButton)
 
 $closeButton = [System.Windows.Forms.Button]::new()
 $closeButton.Text = "Close"
-$closeButton.Location = [System.Drawing.Point]::new(790, 80)
+$closeButton.Location = [System.Drawing.Point]::new(668, 80)
 $closeButton.Size = [System.Drawing.Size]::new(110, 30)
 $closeButton.Add_Click({ $form.Close() })
 $form.Controls.Add($closeButton)

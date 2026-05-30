@@ -112,7 +112,7 @@ function Read-SelectedRepositories {
 
     $repositories = $deduped.Values | Sort-Object Owner, Name
     if (-not $repositories) {
-        throw "No tools are selected in $fullPath"
+        return @()
     }
     return $repositories
 }
@@ -166,7 +166,8 @@ if ($outputDirectory -and -not (Test-Path $outputDirectory)) {
 }
 
 [System.IO.File]::WriteAllText($outputFullPath, $builder.ToString(), [System.Text.UTF8Encoding]::new($false))
-$resolved | ConvertTo-Json -Depth 8 | Set-Content -Path $metadataFullPath -Encoding UTF8
+$metadataJson = if ($resolved) { $resolved | ConvertTo-Json -Depth 8 } else { "[]" }
+[System.IO.File]::WriteAllText($metadataFullPath, $metadataJson + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
 
 Write-Host "Wrote $outputFullPath"
 Write-Host "Wrote $metadataFullPath"

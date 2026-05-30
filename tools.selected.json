@@ -1,10 +1,5 @@
 [
     {
-        "name":  "bwa",
-        "owner":  "devteam",
-        "section":  "Mapping"
-    },
-    {
         "name":  "fastqc",
         "owner":  "devteam",
         "section":  "Quality Control"
@@ -15,27 +10,7 @@
         "section":  "BLAST"
     },
     {
-        "name":  "samtools_flagstat",
-        "owner":  "devteam",
-        "section":  "SAM/BAM"
-    },
-    {
-        "name":  "samtools_idxstats",
-        "owner":  "devteam",
-        "section":  "SAM/BAM"
-    },
-    {
-        "name":  "samtools_mpileup",
-        "owner":  "devteam",
-        "section":  "SAM/BAM"
-    },
-    {
         "name":  "samtools_sort",
-        "owner":  "devteam",
-        "section":  "SAM/BAM"
-    },
-    {
-        "name":  "samtools_stats",
         "owner":  "devteam",
         "section":  "SAM/BAM"
     },
@@ -55,32 +30,12 @@
         "section":  "Phylogenetics"
     },
     {
+        "name":  "iqtree",
+        "owner":  "iuc",
+        "section":  "Tools"
+    },
+    {
         "name":  "ivar_consensus",
-        "owner":  "iuc",
-        "section":  "Viral Amplicon"
-    },
-    {
-        "name":  "ivar_filtervariants",
-        "owner":  "iuc",
-        "section":  "Viral Amplicon"
-    },
-    {
-        "name":  "ivar_getmasked",
-        "owner":  "iuc",
-        "section":  "Viral Amplicon"
-    },
-    {
-        "name":  "ivar_removereads",
-        "owner":  "iuc",
-        "section":  "Viral Amplicon"
-    },
-    {
-        "name":  "ivar_trim",
-        "owner":  "iuc",
-        "section":  "Viral Amplicon"
-    },
-    {
-        "name":  "ivar_variants",
         "owner":  "iuc",
         "section":  "Viral Amplicon"
     },
@@ -88,46 +43,6 @@
         "name":  "kraken2",
         "owner":  "iuc",
         "section":  "Taxonomy"
-    },
-    {
-        "name":  "samtools_collate",
-        "owner":  "iuc",
-        "section":  "SAM/BAM"
-    },
-    {
-        "name":  "samtools_coverage",
-        "owner":  "iuc",
-        "section":  "SAM/BAM"
-    },
-    {
-        "name":  "samtools_depth",
-        "owner":  "iuc",
-        "section":  "SAM/BAM"
-    },
-    {
-        "name":  "samtools_fastx",
-        "owner":  "iuc",
-        "section":  "SAM/BAM"
-    },
-    {
-        "name":  "samtools_fixmate",
-        "owner":  "iuc",
-        "section":  "SAM/BAM"
-    },
-    {
-        "name":  "samtools_markdup",
-        "owner":  "iuc",
-        "section":  "SAM/BAM"
-    },
-    {
-        "name":  "samtools_merge",
-        "owner":  "iuc",
-        "section":  "SAM/BAM"
-    },
-    {
-        "name":  "samtools_view",
-        "owner":  "iuc",
-        "section":  "SAM/BAM"
     },
     {
         "name":  "seqsero2",

@@ -6,7 +6,8 @@ param(
     [string]$MetadataPath,
     [string]$RemovedPath,
     [string]$ToolShedUrl = "https://toolshed.g2.bx.psu.edu",
-    [switch]$KeepPendingOnMissing
+    [switch]$KeepPendingOnMissing,
+    [switch]$ReconcileInstalledWithSelection
 )
 
 $ErrorActionPreference = "Stop"
@@ -143,6 +144,70 @@ function Get-ActiveInstalledMap {
     return $map
 }
 
+function Get-ToolMap {
+    param([object[]]$Tools)
+
+    $map = @{}
+    foreach ($tool in (ConvertTo-Array $Tools)) {
+        if (-not $tool.name -or -not $tool.owner) {
+            continue
+        }
+        $map[(Get-ToolKey -Owner ([string]$tool.owner) -Name ([string]$tool.name))] = $true
+    }
+    return $map
+}
+
+function Add-ReconcileRemovals {
+    param(
+        [object[]]$SelectedTools,
+        [object[]]$RemovedTools,
+        [object[]]$Installed
+    )
+
+    if (-not $ReconcileInstalledWithSelection) {
+        return @(ConvertTo-Array $RemovedTools)
+    }
+
+    $selectedMap = Get-ToolMap -Tools $SelectedTools
+    $removedByKey = @{}
+    $reconciled = @()
+
+    foreach ($tool in (ConvertTo-Array $RemovedTools)) {
+        if (-not $tool.name -or -not $tool.owner) {
+            continue
+        }
+        $key = Get-ToolKey -Owner ([string]$tool.owner) -Name ([string]$tool.name)
+        if (-not $removedByKey.ContainsKey($key)) {
+            $removedByKey[$key] = $true
+            $reconciled += $tool
+        }
+    }
+
+    foreach ($repository in (ConvertTo-Array $Installed)) {
+        if (-not $repository.name -or -not $repository.owner) {
+            continue
+        }
+        if (-not (Test-RepositoryInstalled -Repository $repository)) {
+            continue
+        }
+
+        $key = Get-ToolKey -Owner ([string]$repository.owner) -Name ([string]$repository.name)
+        if ($selectedMap.ContainsKey($key) -or $removedByKey.ContainsKey($key)) {
+            continue
+        }
+
+        Write-Host "Selected list no longer includes installed repository; scheduling removal: $($repository.owner)/$($repository.name)"
+        $removedByKey[$key] = $true
+        $reconciled += [pscustomobject]@{
+            name = [string]$repository.name
+            owner = [string]$repository.owner
+            section = "Tools"
+        }
+    }
+
+    return $reconciled
+}
+
 function Wait-RepositoryInstalled {
     param(
         [object]$Tool,
@@ -184,6 +249,41 @@ function Wait-RepositoryInstalled {
     }
 
     throw "Timed out waiting for Galaxy to finish installing ${owner}/${name}."
+}
+
+function Wait-RepositoryRemoved {
+    param(
+        [object]$Tool,
+        [int]$TimeoutSec = 300,
+        [int]$PollSec = 5
+    )
+
+    $name = [string]$Tool.name
+    $owner = [string]$Tool.owner
+    $toolKey = Get-ToolKey -Owner $owner -Name $name
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $attempt = 0
+
+    while ((Get-Date) -lt $deadline) {
+        $installed = Get-InstalledRepositories -Quiet
+        $active = ConvertTo-Array $installed | Where-Object {
+            $_.name -and $_.owner -and
+            (Get-ToolKey -Owner ([string]$_.owner) -Name ([string]$_.name)) -eq $toolKey -and
+            (Test-RepositoryInstalled -Repository $_)
+        }
+        if (-not $active) {
+            Write-Host "Repository removed from active Galaxy tools: $owner/$name"
+            return $installed
+        }
+
+        $attempt++
+        if (($attempt % 6) -eq 1) {
+            Write-Host "Waiting for Galaxy to finish removing: $owner/$name"
+        }
+        Start-Sleep -Seconds $PollSec
+    }
+
+    throw "Timed out waiting for Galaxy to finish removing ${owner}/${name}."
 }
 
 function Get-MetadataByKey {
@@ -281,9 +381,10 @@ function Invoke-RemoveRepositories {
         foreach ($repository in $matches) {
             try {
                 $id = [uri]::EscapeDataString([string]$repository.id)
-                $deleteUri = "$GalaxyUrl/api/tool_shed_repositories/$id?key=$apiKey&remove_from_disk=true"
+                $deleteUri = "{0}/api/tool_shed_repositories/{1}?key={2}&remove_from_disk=true" -f $GalaxyUrl, $id, $apiKey
                 Write-Host "Removing installed repository: $owner/$name"
                 Invoke-RestMethod -Uri $deleteUri -Method Delete -UseBasicParsing -TimeoutSec 120 | Out-Null
+                $Installed = Wait-RepositoryRemoved -Tool $tool
             } catch {
                 $hadFailures = $true
                 $remaining += $tool
@@ -298,11 +399,12 @@ function Invoke-RemoveRepositories {
     }
 }
 
-$selectedTools = Read-JsonArray -Path $SelectionPath
-$removedTools = Read-JsonArray -Path $RemovedPath
+$selectedTools = @(Read-JsonArray -Path $SelectionPath)
+$removedTools = @(Read-JsonArray -Path $RemovedPath)
 $metadataByKey = Get-MetadataByKey
 
 $installed = Get-InstalledRepositories
+$removedTools = @(Add-ReconcileRemovals -SelectedTools $selectedTools -RemovedTools $removedTools -Installed $installed)
 Invoke-RemoveRepositories -RemovedTools $removedTools -Installed $installed
 
 $installed = Get-InstalledRepositories

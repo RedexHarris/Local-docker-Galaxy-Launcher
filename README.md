@@ -12,7 +12,7 @@
 - 提供 Windows GUI 应用程序启动器：检查 Docker、首次构建镜像、后续直接启动容器、等待 Galaxy 就绪、打开登录页并自动关闭启动器。
 - 启动器、工具管理和日志窗口都不再依赖可见命令提示符窗口。
 - 启动器会显示当前 Galaxy 容器状态，例如 `running`、`exited`、`starting`，Docker Compose 的正常状态进度不会再弹成错误。
-- 提供工具管理界面：从 Galaxy Tool Shed 搜索官方工具仓库，勾选并点击 `Save and apply` 后通过 Galaxy 官方 API 增量安装，取消勾选后增量卸载。
+- 提供工具管理界面：从 Galaxy Tool Shed 搜索官方工具仓库，勾选并点击 `Apply changes` 后通过 Galaxy 官方 API 增量安装，取消勾选后增量卸载。
 - 提供 `Clear data` 清理功能：删除并 purge Galaxy 历史记录、数据集、输出文件，并取消仍在运行的任务；不删除已安装工具。
 - `tools.selected.json` 保存当前选择，`tool_list.yml` 由 `scripts/Update-ToolList.ps1` 从 Galaxy Tool Shed 拉取最新可安装 revision 生成。
 
@@ -55,8 +55,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-Launcher.ps1
 - 在搜索框输入工具名，例如 `kraken2` 或 `seqsero2`。
 - 点击 `Search Tool Shed`，界面会从 Galaxy Tool Shed 拉取匹配的官方仓库列表。
 - 勾选要加入 Galaxy 的工具；取消勾选已选工具，会从运行中的 Galaxy 卸载。
-- 点击 `Save only` 只保存选择并重写 `tool_list.yml`，不会把工具安装进正在运行的 Galaxy。
-- 点击 `Save and apply` 会保存选择、启动容器，并通过 Galaxy API 只安装新增工具、只卸载取消勾选的工具。
+- 点击 `Apply changes` 会保存选择、启动容器，并通过 Galaxy API 只安装新增工具、只卸载取消勾选的工具。
 
 注意：首次镜像不存在时仍会构建一次，并按 `tool_list.yml` 安装当前选择的工具。之后工具选择变更不需要重建镜像，已安装且仍被勾选的工具不会重新下载安装；只有新增工具及其依赖会下载，取消勾选的工具会通过 Galaxy API 卸载。
 
@@ -107,7 +106,7 @@ docker volume rm local-usegalaxy_galaxy-export
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Update-ToolList.ps1
 ```
 
-刷新 revision 不会强制重装已安装工具。需要安装新勾选工具时，在启动器中点击 `Tools`，再点击 `Save and apply`。
+刷新 revision 不会强制重装已安装工具。需要安装新勾选工具时，在启动器中点击 `Tools`，再点击 `Apply changes`。
 
 ## 常用配置
 
