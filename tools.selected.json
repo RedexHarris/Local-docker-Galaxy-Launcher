@@ -1,0 +1,147 @@
+[
+  {
+    "name": "fastqc",
+    "owner": "devteam",
+    "section": "Quality Control"
+  },
+  {
+    "name": "fastp",
+    "owner": "iuc",
+    "section": "Quality Control"
+  },
+  {
+    "name": "spades",
+    "owner": "nml",
+    "section": "Assembly"
+  },
+  {
+    "name": "bwa",
+    "owner": "devteam",
+    "section": "Mapping"
+  },
+  {
+    "name": "samtools_view",
+    "owner": "iuc",
+    "section": "SAM/BAM"
+  },
+  {
+    "name": "samtools_sort",
+    "owner": "devteam",
+    "section": "SAM/BAM"
+  },
+  {
+    "name": "samtools_fastx",
+    "owner": "iuc",
+    "section": "SAM/BAM"
+  },
+  {
+    "name": "samtools_merge",
+    "owner": "iuc",
+    "section": "SAM/BAM"
+  },
+  {
+    "name": "samtools_fixmate",
+    "owner": "iuc",
+    "section": "SAM/BAM"
+  },
+  {
+    "name": "samtools_markdup",
+    "owner": "iuc",
+    "section": "SAM/BAM"
+  },
+  {
+    "name": "samtools_collate",
+    "owner": "iuc",
+    "section": "SAM/BAM"
+  },
+  {
+    "name": "samtools_depth",
+    "owner": "iuc",
+    "section": "SAM/BAM"
+  },
+  {
+    "name": "samtools_coverage",
+    "owner": "iuc",
+    "section": "SAM/BAM"
+  },
+  {
+    "name": "samtools_mpileup",
+    "owner": "devteam",
+    "section": "SAM/BAM"
+  },
+  {
+    "name": "samtools_flagstat",
+    "owner": "devteam",
+    "section": "SAM/BAM"
+  },
+  {
+    "name": "samtools_stats",
+    "owner": "devteam",
+    "section": "SAM/BAM"
+  },
+  {
+    "name": "samtools_idxstats",
+    "owner": "devteam",
+    "section": "SAM/BAM"
+  },
+  {
+    "name": "ivar_trim",
+    "owner": "iuc",
+    "section": "Viral Amplicon"
+  },
+  {
+    "name": "ivar_consensus",
+    "owner": "iuc",
+    "section": "Viral Amplicon"
+  },
+  {
+    "name": "ivar_variants",
+    "owner": "iuc",
+    "section": "Viral Amplicon"
+  },
+  {
+    "name": "ivar_filtervariants",
+    "owner": "iuc",
+    "section": "Viral Amplicon"
+  },
+  {
+    "name": "ivar_removereads",
+    "owner": "iuc",
+    "section": "Viral Amplicon"
+  },
+  {
+    "name": "ivar_getmasked",
+    "owner": "iuc",
+    "section": "Viral Amplicon"
+  },
+  {
+    "name": "ncbi_blast_plus",
+    "owner": "devteam",
+    "section": "BLAST"
+  },
+  {
+    "name": "mafft",
+    "owner": "rnateam",
+    "section": "Alignment"
+  },
+  {
+    "name": "snippy",
+    "owner": "iuc",
+    "section": "Variant Calling"
+  },
+  {
+    "name": "gubbins",
+    "owner": "iuc",
+    "section": "Phylogenetics"
+  },
+  {
+    "name": "kraken2",
+    "owner": "iuc",
+    "section": "Taxonomy"
+  },
+  {
+    "name": "seqsero2",
+    "owner": "iuc",
+    "section": "Serotyping"
+  }
+]

@@ -1,0 +1,27 @@
+name: local-usegalaxy
+
+services:
+  galaxy:
+    build:
+      context: .
+      args:
+        GALAXY_BASE_IMAGE: ${GALAXY_BASE_IMAGE:-quay.io/bgruening/galaxy:26.0}
+    image: ${GALAXY_IMAGE:-local-usegalaxy:latest}
+    container_name: ${GALAXY_CONTAINER_NAME:-local-usegalaxy}
+    restart: unless-stopped
+    ports:
+      - "${GALAXY_PORT:-8080}:80"
+      - "${GALAXY_FTP_PORT:-8021}:21"
+      - "${GALAXY_SSH_PORT:-8022}:22"
+    environment:
+      GALAXY_CONFIG_ADMIN_USERS: ${GALAXY_ADMIN_EMAIL:-admin@example.org}
+      GALAXY_CONFIG_BOOTSTRAP_ADMIN_API_KEY: ${GALAXY_ADMIN_API_KEY:-local-usegalaxy-admin-key}
+      GALAXY_DEFAULT_ADMIN_USER: ${GALAXY_ADMIN_EMAIL:-admin@example.org}
+      GALAXY_DEFAULT_ADMIN_PASSWORD: ${GALAXY_ADMIN_PASSWORD:-password}
+      GALAXY_DEFAULT_ADMIN_KEY: ${GALAXY_ADMIN_API_KEY:-local-usegalaxy-admin-key}
+      GALAXY_CONFIG_BRAND: ${GALAXY_BRAND:-Local Galaxy Bioinformatics}
+    volumes:
+      - galaxy-export:/export
+
+volumes:
+  galaxy-export:
