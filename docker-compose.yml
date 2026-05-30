@@ -16,6 +16,7 @@ services:
     environment:
       GALAXY_CONFIG_ADMIN_USERS: ${GALAXY_ADMIN_EMAIL:-admin@example.org}
       GALAXY_CONFIG_BOOTSTRAP_ADMIN_API_KEY: ${GALAXY_ADMIN_API_KEY:-local-usegalaxy-admin-key}
+      GALAXY_DEFAULT_ADMIN_EMAIL: ${GALAXY_ADMIN_EMAIL:-admin@example.org}
       GALAXY_DEFAULT_ADMIN_USER: ${GALAXY_ADMIN_EMAIL:-admin@example.org}
       GALAXY_DEFAULT_ADMIN_PASSWORD: ${GALAXY_ADMIN_PASSWORD:-password}
       GALAXY_DEFAULT_ADMIN_KEY: ${GALAXY_ADMIN_API_KEY:-local-usegalaxy-admin-key}
