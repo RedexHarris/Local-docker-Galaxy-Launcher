@@ -1,21 +1,34 @@
 ﻿# 本项目完全由Codex编写
 
-# 本地 Galaxy 生信分析平台
+# 本地 Galaxy 生信分析平台启动器
 
 这个项目用 Galaxy 官方社区 Docker 镜像部署本地 Galaxy，并在镜像构建阶段通过 Tool Shed 安装常用生信工具。Windows 用户双击 `Start-Galaxy.exe` 即可打开启动器；只要电脑已经安装 Docker Desktop/Engine，就可以一键构建、启动并打开 Galaxy 登录页。
 
 ## 已实现
 
 - 使用 `quay.io/bgruening/galaxy:26.0` 作为基础镜像，并用官方 `install-tools` 方式扩展工具。
+
 - 用 Docker Compose 启动 Galaxy，Web 端口默认是 `http://localhost:8080`。
+
 - `/export` 挂载到命名卷 `local-usegalaxy_galaxy-export`，退出 Docker 或重启电脑后状态保留。
+
 - 提供 Windows GUI 应用程序启动器：检查 Docker、首次构建镜像、后续直接启动容器、等待 Galaxy 就绪、打开登录页并自动关闭启动器。
+
 - 启动器、工具管理和日志窗口都不再依赖可见命令提示符窗口。
+
 - 启动器会显示当前 Galaxy 容器状态，例如 `running`、`exited`、`starting`，Docker Compose 的正常状态进度不会再弹成错误。
+
 - 提供工具管理界面：从 Galaxy Tool Shed 搜索官方工具仓库，勾选并点击 `Apply changes` 后通过 Galaxy 官方 API 增量安装，取消勾选后增量卸载。
+
 - 提供 `Clear data` 清理功能：删除并 purge Galaxy 历史记录、数据集、输出文件，清理 Docker volume 里的实际数据文件和任务临时目录，并取消仍在运行的任务；不删除已安装工具。
+
 - 提供 `Compact disk` 压缩功能：清理数据后可停止 Galaxy、关闭 Docker Desktop/WSL，并压缩 Docker Desktop 的 VHDX 虚拟磁盘，把已释放空间尽量还给 Windows；不删除镜像、容器、卷、Galaxy 数据或已安装工具。
+
 - `tools.selected.json` 保存当前选择，`tool_list.yml` 由 `scripts/Update-ToolList.ps1` 从 Galaxy Tool Shed 拉取最新可安装 revision 生成。
+
+## 未来更新目标
+
+- 选择加载比对数据库
 
 ## 默认登录信息
 
@@ -60,6 +73,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-Launcher.ps1
 
 注意：首次镜像不存在时仍会构建一次，并按 `tool_list.yml` 安装当前选择的工具。之后工具选择变更不需要重建镜像，已安装且仍被勾选的工具不会重新下载安装；只有新增工具及其依赖会下载，取消勾选的工具会通过 Galaxy API 卸载。
 
+如需刷新到当前 Tool Shed 最新可安装 revision：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Update-ToolList.ps1
+```
+
+刷新 revision 不会强制重装已安装工具。需要安装新勾选工具时，在启动器中点击 `Tools`，再点击 `Apply changes`。
+
 ## 清理任务和文件
 
 启动器中点击 `Clear data` 会先二次确认，然后通过 Galaxy API 清理历史记录、数据集、输出文件，并取消仍在排队或运行的任务。随后它会进入容器清理 `/export/galaxy/database/files`、`/export/galaxy/database/job_working_directory`、`/export/galaxy/database/tmp` 和 `/export/galaxy/database/object_store_cache` 里的实际文件。这个功能不会调用 Tool Shed 仓库删除接口，也不会删除 `/export/galaxy/database/shed_tools`，因此已安装工具会保留。
@@ -88,30 +109,6 @@ docker compose stop
 docker compose down -v
 docker volume rm local-usegalaxy_galaxy-export
 ```
-
-## 已安装工具
-
-核心工具覆盖：
-
-- FastQC、fastp
-- SPAdes
-- BWA
-- Samtools 常用 wrapper：view、sort、fastx、merge、fixmate、markdup、collate、depth、coverage、mpileup、flagstat、stats、idxstats
-- iVar wrapper：trim、consensus、variants、filtervariants、removereads、getmasked
-- NCBI BLAST+
-- MAFFT
-- Snippy
-- Gubbins
-- Kraken2
-- SeqSero2
-
-如需刷新到当前 Tool Shed 最新可安装 revision：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Update-ToolList.ps1
-```
-
-刷新 revision 不会强制重装已安装工具。需要安装新勾选工具时，在启动器中点击 `Tools`，再点击 `Apply changes`。
 
 ## 常用配置
 
