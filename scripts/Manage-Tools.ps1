@@ -1,0 +1,541 @@
+[CmdletBinding()]
+param(
+    [string]$ToolShedUrl = "https://toolshed.g2.bx.psu.edu",
+    [string]$SelectionPath,
+    [string]$ProjectRoot
+)
+
+$ErrorActionPreference = "Stop"
+
+if (-not $ProjectRoot) {
+    $ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+}
+if (-not $SelectionPath) {
+    $SelectionPath = Join-Path $ProjectRoot "tools.selected.json"
+}
+
+$ToolShedUrl = $ToolShedUrl.TrimEnd("/")
+$SelectionPath = [System.IO.Path]::GetFullPath($SelectionPath)
+$LogFile = Join-Path $ProjectRoot "tool-manager.log"
+$RemovedPath = Join-Path $ProjectRoot "tools.removed.json"
+$EnvFile = Join-Path $ProjectRoot ".env"
+
+$script:Grid = $null
+$script:StatusLabel = $null
+$script:SearchBox = $null
+$script:RowKeys = @{}
+
+function ConvertTo-Array {
+    param([object]$Value)
+    if ($null -eq $Value) {
+        return @()
+    }
+    if ($Value -is [System.Array]) {
+        return $Value
+    }
+    return @($Value)
+}
+
+function Add-Log {
+    param([string]$Message)
+    $stamp = (Get-Date).ToString("HH:mm:ss")
+    $line = "[$stamp] $Message"
+    Add-Content -Path $LogFile -Value $line -Encoding UTF8
+    if ($script:StatusLabel) {
+        $script:StatusLabel.Text = $Message
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+}
+
+function Get-Owner {
+    param([object]$Repository)
+    if ($Repository.owner) {
+        return [string]$Repository.owner
+    }
+    if ($Repository.repo_owner_username) {
+        return [string]$Repository.repo_owner_username
+    }
+    return ""
+}
+
+function Get-Updated {
+    param([object]$Repository)
+    if ($Repository.update_time) {
+        return [string]$Repository.update_time
+    }
+    if ($Repository.full_last_updated) {
+        return [string]$Repository.full_last_updated
+    }
+    if ($Repository.last_update) {
+        return [string]$Repository.last_update
+    }
+    return ""
+}
+
+function Get-Key {
+    param(
+        [string]$Owner,
+        [string]$Name
+    )
+    return ("{0}/{1}" -f $Owner, $Name).ToLowerInvariant()
+}
+
+function Read-SelectedTools {
+    if (-not (Test-Path $SelectionPath)) {
+        return @()
+    }
+    return ConvertTo-Array ((Get-Content -Raw -Encoding UTF8 $SelectionPath) | ConvertFrom-Json)
+}
+
+function Read-PendingRemovedTools {
+    if (-not (Test-Path $RemovedPath)) {
+        return @()
+    }
+    return ConvertTo-Array ((Get-Content -Raw -Encoding UTF8 $RemovedPath) | ConvertFrom-Json)
+}
+
+function Read-DotEnv {
+    $values = @{}
+    if (-not (Test-Path $EnvFile)) {
+        return $values
+    }
+
+    Get-Content $EnvFile | ForEach-Object {
+        $line = $_.Trim()
+        if (-not $line -or $line.StartsWith("#") -or -not $line.Contains("=")) {
+            return
+        }
+        $parts = $line.Split("=", 2)
+        $values[$parts[0].Trim()] = $parts[1].Trim().Trim('"').Trim("'")
+    }
+    return $values
+}
+
+function Write-PendingRemovedTools {
+    param([object[]]$Tools)
+
+    $deduped = @{}
+    foreach ($tool in (ConvertTo-Array $Tools)) {
+        if (-not $tool.name -or -not $tool.owner) {
+            continue
+        }
+        $key = Get-Key -Owner ([string]$tool.owner) -Name ([string]$tool.name)
+        if (-not $deduped.ContainsKey($key)) {
+            $deduped[$key] = [pscustomobject]@{
+                name = [string]$tool.name
+                owner = [string]$tool.owner
+                section = if ($tool.section) { [string]$tool.section } else { "Tools" }
+            }
+        }
+    }
+
+    $items = $deduped.Values | Sort-Object owner, name
+    if (-not $items) {
+        if (Test-Path $RemovedPath) {
+            Remove-Item -LiteralPath $RemovedPath -Force
+        }
+        return
+    }
+
+    $json = $items | ConvertTo-Json -Depth 6
+    [System.IO.File]::WriteAllText($RemovedPath, $json + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+}
+
+function Add-ToolRow {
+    param(
+        [string]$Name,
+        [string]$Owner,
+        [string]$Section = "Tools",
+        [string]$Description = "",
+        [string]$Updated = "",
+        [string]$Downloads = "",
+        [bool]$Selected = $false
+    )
+
+    if (-not $Name -or -not $Owner) {
+        return
+    }
+
+    $key = Get-Key -Owner $Owner -Name $Name
+    if ($script:RowKeys.ContainsKey($key)) {
+        $row = $script:Grid.Rows[$script:RowKeys[$key]]
+        if ($Selected) {
+            $row.Cells["Selected"].Value = $true
+        }
+        if ($Description) {
+            $row.Cells["Description"].Value = $Description
+        }
+        if ($Updated) {
+            $row.Cells["Updated"].Value = $Updated
+        }
+        if ($Downloads) {
+            $row.Cells["Downloads"].Value = $Downloads
+        }
+        return
+    }
+
+    $index = $script:Grid.Rows.Add()
+    $script:RowKeys[$key] = $index
+    $row = $script:Grid.Rows[$index]
+    $row.Cells["Selected"].Value = $Selected
+    $row.Cells["Owner"].Value = $Owner
+    $row.Cells["Name"].Value = $Name
+    $row.Cells["Section"].Value = if ($Section) { $Section } else { "Tools" }
+    $row.Cells["Updated"].Value = $Updated
+    $row.Cells["Downloads"].Value = $Downloads
+    $row.Cells["Description"].Value = $Description
+    $row.Cells["Key"].Value = $key
+}
+
+function Load-SelectedTools {
+    $tools = Read-SelectedTools
+    foreach ($tool in $tools) {
+        Add-ToolRow `
+            -Name ([string]$tool.name) `
+            -Owner ([string]$tool.owner) `
+            -Section ([string]$tool.section) `
+            -Selected $true
+    }
+    Add-Log ("Loaded {0} selected tools." -f (ConvertTo-Array $tools).Count)
+}
+
+function Search-OfficialTools {
+    param([string]$Query)
+
+    if (-not $Query.Trim()) {
+        throw "Enter a Tool Shed search term first."
+    }
+
+    Add-Log "Searching Galaxy Tool Shed..."
+    $escaped = [uri]::EscapeDataString($Query.Trim())
+    $uri = "$ToolShedUrl/api/repositories?q=$escaped&page_size=100"
+    $result = Invoke-RestMethod -Uri $uri -UseBasicParsing
+
+    $repositories = @()
+    if ($result.hits) {
+        $repositories = ConvertTo-Array $result.hits | ForEach-Object { $_.repository }
+    } else {
+        $repositories = ConvertTo-Array $result
+    }
+
+    $count = 0
+    foreach ($repository in $repositories) {
+        $owner = Get-Owner -Repository $repository
+        if (-not $repository.name -or -not $owner) {
+            continue
+        }
+        Add-ToolRow `
+            -Name ([string]$repository.name) `
+            -Owner $owner `
+            -Section "Tools" `
+            -Description ([string]$repository.description) `
+            -Updated (Get-Updated -Repository $repository) `
+            -Downloads ([string]$repository.times_downloaded) `
+            -Selected $false
+        $count++
+    }
+    Add-Log ("Added {0} Tool Shed search results." -f $count)
+}
+
+function Save-Selection {
+    $script:Grid.EndEdit()
+    $previousSelection = @(ConvertTo-Array (Read-SelectedTools))
+    $previousByKey = @{}
+    foreach ($tool in $previousSelection) {
+        if ($tool.name -and $tool.owner) {
+            $previousByKey[(Get-Key -Owner ([string]$tool.owner) -Name ([string]$tool.name))] = $tool
+        }
+    }
+
+    $selected = @()
+    $selectedByKey = @{}
+    foreach ($row in $script:Grid.Rows) {
+        if ($row.IsNewRow) {
+            continue
+        }
+        $isSelected = $row.Cells["Selected"].Value
+        if (-not $isSelected) {
+            continue
+        }
+        $name = [string]$row.Cells["Name"].Value
+        $owner = [string]$row.Cells["Owner"].Value
+        $section = [string]$row.Cells["Section"].Value
+        if (-not $name -or -not $owner) {
+            continue
+        }
+        $tool = [pscustomobject]@{
+            name = $name
+            owner = $owner
+            section = if ($section) { $section } else { "Tools" }
+        }
+        $selected += $tool
+        $selectedByKey[(Get-Key -Owner $owner -Name $name)] = $tool
+    }
+
+    $pendingRemoved = @(ConvertTo-Array (Read-PendingRemovedTools))
+    foreach ($key in $previousByKey.Keys) {
+        if (-not $selectedByKey.ContainsKey($key)) {
+            $pendingRemoved += @($previousByKey[$key])
+        }
+    }
+    $pendingRemoved = @($pendingRemoved | Where-Object {
+        $_.name -and $_.owner -and -not $selectedByKey.ContainsKey((Get-Key -Owner ([string]$_.owner) -Name ([string]$_.name)))
+    })
+    Write-PendingRemovedTools -Tools $pendingRemoved
+
+    $selected = $selected | Sort-Object owner, name -Unique
+    $json = $selected | ConvertTo-Json -Depth 6
+    if (-not $json) {
+        $json = "[]"
+    }
+    [System.IO.File]::WriteAllText($SelectionPath, $json + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+    Add-Log ("Saved {0} selected tools." -f (ConvertTo-Array $selected).Count)
+
+    $scriptPath = Join-Path $PSScriptRoot "Update-ToolList.ps1"
+    Add-Log "Regenerating tool_list.yml..."
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -SelectionPath $SelectionPath 2>&1 | ForEach-Object {
+        Add-Log ($_.ToString())
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Update-ToolList.ps1 failed."
+    }
+    Add-Log "tool_list.yml regenerated."
+}
+
+function Test-Executable {
+    param([string]$Name)
+    return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
+}
+
+function Invoke-Compose {
+    param([string[]]$Arguments)
+
+    Push-Location $ProjectRoot
+    try {
+        if (Test-Executable "docker") {
+            & docker compose version *> $null
+            if ($LASTEXITCODE -eq 0) {
+                $previousErrorActionPreference = $ErrorActionPreference
+                try {
+                    $ErrorActionPreference = "Continue"
+                    $output = & docker compose @Arguments 2>&1
+                    $exitCode = $LASTEXITCODE
+                } finally {
+                    $ErrorActionPreference = $previousErrorActionPreference
+                }
+                $output | Where-Object { $_ } | ForEach-Object { Add-Log ($_.ToString()) }
+                if ($exitCode -ne 0) {
+                    throw "docker compose failed."
+                }
+                return
+            }
+        }
+        if (Test-Executable "docker-compose") {
+            $previousErrorActionPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = "Continue"
+                $output = & docker-compose @Arguments 2>&1
+                $exitCode = $LASTEXITCODE
+            } finally {
+                $ErrorActionPreference = $previousErrorActionPreference
+            }
+            $output | Where-Object { $_ } | ForEach-Object { Add-Log ($_.ToString()) }
+            if ($exitCode -ne 0) {
+                throw "docker-compose failed."
+            }
+            return
+        }
+        throw "Docker Compose was not found."
+    } finally {
+        Pop-Location
+    }
+}
+
+function Test-DockerImage {
+    param([string]$ImageName)
+
+    & docker image inspect $ImageName *> $null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Ensure-GalaxyImage {
+    $config = Read-DotEnv
+    $imageName = if ($config.GALAXY_IMAGE) { $config.GALAXY_IMAGE } else { "local-usegalaxy:latest" }
+    if (Test-DockerImage -ImageName $imageName) {
+        Add-Log "Galaxy image exists. Skipping Docker rebuild."
+        return
+    }
+
+    Add-Log "Galaxy image is missing. Building it once..."
+    Invoke-Compose @("build")
+}
+
+function Wait-GalaxyReady {
+    $config = Read-DotEnv
+    $port = if ($config.GALAXY_PORT) { $config.GALAXY_PORT } else { "8080" }
+    $galaxyUrl = "http://localhost:$port"
+
+    Add-Log "Waiting for Galaxy to become ready..."
+    for ($i = 1; $i -le 180; $i++) {
+        try {
+            $response = Invoke-WebRequest -Uri "$galaxyUrl/api/version" -UseBasicParsing -TimeoutSec 5
+            if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 500) {
+                Add-Log "Galaxy is ready."
+                return
+            }
+        } catch {
+            if (($i % 6) -eq 0) {
+                Add-Log "Galaxy is starting..."
+            }
+        }
+        Start-Sleep -Seconds 5
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+
+    throw "Galaxy did not become ready in time."
+}
+
+function Apply-ToolChanges {
+    Save-Selection
+    Ensure-GalaxyImage
+    Add-Log "Starting Galaxy without rebuilding the image..."
+    Invoke-Compose @("up", "-d", "--no-build")
+    Wait-GalaxyReady
+    $syncScript = Join-Path $PSScriptRoot "Sync-GalaxyTools.ps1"
+    $config = Read-DotEnv
+    $port = if ($config.GALAXY_PORT) { $config.GALAXY_PORT } else { "8080" }
+    $apiKey = if ($config.GALAXY_ADMIN_API_KEY) { $config.GALAXY_ADMIN_API_KEY } else { "local-usegalaxy-admin-key" }
+    $galaxyUrl = "http://localhost:$port"
+    $metadataPath = Join-Path $ProjectRoot "tool_list.metadata.json"
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $syncScript -GalaxyUrl $galaxyUrl -ApiKey $apiKey -SelectionPath $SelectionPath -MetadataPath $metadataPath -RemovedPath $RemovedPath -ReconcileInstalledWithSelection 2>&1 | ForEach-Object {
+        Add-Log ($_.ToString())
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Sync-GalaxyTools.ps1 failed. See tool-manager.log for details."
+    }
+    Add-Log "Tool changes were applied. Refresh the Galaxy browser tab if it was already open."
+}
+
+try {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+} catch {
+    throw "Windows Forms is not available."
+}
+
+[System.Windows.Forms.Application]::EnableVisualStyles()
+
+$form = [System.Windows.Forms.Form]::new()
+$form.Text = "Galaxy Tool Manager"
+$form.StartPosition = "CenterScreen"
+$form.ClientSize = [System.Drawing.Size]::new(980, 610)
+$form.FormBorderStyle = "FixedSingle"
+$form.MaximizeBox = $false
+
+$title = [System.Windows.Forms.Label]::new()
+$title.Text = "Galaxy Tool Shed Manager"
+$title.Font = [System.Drawing.Font]::new("Segoe UI", 15, [System.Drawing.FontStyle]::Bold)
+$title.AutoSize = $true
+$title.Location = [System.Drawing.Point]::new(18, 16)
+$form.Controls.Add($title)
+
+$hint = [System.Windows.Forms.Label]::new()
+$hint.Text = "Search Tool Shed, check tools to keep, then apply changes to install checked tools and remove unchecked tools."
+$hint.Font = [System.Drawing.Font]::new("Segoe UI", 9)
+$hint.AutoSize = $false
+$hint.Location = [System.Drawing.Point]::new(20, 50)
+$hint.Size = [System.Drawing.Size]::new(920, 24)
+$form.Controls.Add($hint)
+
+$searchBox = [System.Windows.Forms.TextBox]::new()
+$script:SearchBox = $searchBox
+$searchBox.Location = [System.Drawing.Point]::new(22, 82)
+$searchBox.Size = [System.Drawing.Size]::new(320, 24)
+$searchBox.Text = "kraken2"
+$form.Controls.Add($searchBox)
+
+$searchButton = [System.Windows.Forms.Button]::new()
+$searchButton.Text = "Search Tool Shed"
+$searchButton.Location = [System.Drawing.Point]::new(354, 80)
+$searchButton.Size = [System.Drawing.Size]::new(140, 30)
+$searchButton.Add_Click({
+    try {
+        Search-OfficialTools -Query $script:SearchBox.Text
+    } catch {
+        Add-Log "Error: $($_.Exception.Message)"
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Galaxy Tool Manager", "OK", "Error") | Out-Null
+    }
+})
+$form.Controls.Add($searchButton)
+
+$applyButton = [System.Windows.Forms.Button]::new()
+$applyButton.Text = "Apply changes"
+$applyButton.Location = [System.Drawing.Point]::new(506, 80)
+$applyButton.Size = [System.Drawing.Size]::new(150, 30)
+$applyButton.Add_Click({
+    try {
+        Apply-ToolChanges
+    } catch {
+        Add-Log "Error: $($_.Exception.Message)"
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Galaxy Tool Manager", "OK", "Error") | Out-Null
+    }
+})
+$form.Controls.Add($applyButton)
+
+$closeButton = [System.Windows.Forms.Button]::new()
+$closeButton.Text = "Close"
+$closeButton.Location = [System.Drawing.Point]::new(668, 80)
+$closeButton.Size = [System.Drawing.Size]::new(110, 30)
+$closeButton.Add_Click({ $form.Close() })
+$form.Controls.Add($closeButton)
+
+$grid = [System.Windows.Forms.DataGridView]::new()
+$script:Grid = $grid
+$grid.Location = [System.Drawing.Point]::new(22, 124)
+$grid.Size = [System.Drawing.Size]::new(918, 410)
+$grid.AllowUserToAddRows = $false
+$grid.AllowUserToDeleteRows = $false
+$grid.AutoSizeColumnsMode = "None"
+$grid.SelectionMode = "FullRowSelect"
+$grid.MultiSelect = $false
+$grid.RowHeadersVisible = $false
+
+$selectedColumn = [System.Windows.Forms.DataGridViewCheckBoxColumn]::new()
+$selectedColumn.Name = "Selected"
+$selectedColumn.HeaderText = "Use"
+$selectedColumn.Width = 45
+$grid.Columns.Add($selectedColumn) | Out-Null
+
+foreach ($columnInfo in @(
+    @{ Name = "Owner"; Header = "Owner"; Width = 110; ReadOnly = $true },
+    @{ Name = "Name"; Header = "Name"; Width = 160; ReadOnly = $true },
+    @{ Name = "Section"; Header = "Section"; Width = 130; ReadOnly = $false },
+    @{ Name = "Updated"; Header = "Updated"; Width = 135; ReadOnly = $true },
+    @{ Name = "Downloads"; Header = "Downloads"; Width = 80; ReadOnly = $true },
+    @{ Name = "Description"; Header = "Description"; Width = 330; ReadOnly = $true },
+    @{ Name = "Key"; Header = "Key"; Width = 80; ReadOnly = $true }
+)) {
+    $column = [System.Windows.Forms.DataGridViewTextBoxColumn]::new()
+    $column.Name = $columnInfo.Name
+    $column.HeaderText = $columnInfo.Header
+    $column.Width = $columnInfo.Width
+    $column.ReadOnly = [bool]$columnInfo.ReadOnly
+    if ($columnInfo.Name -eq "Key") {
+        $column.Visible = $false
+    }
+    $grid.Columns.Add($column) | Out-Null
+}
+
+$form.Controls.Add($grid)
+
+$statusLabel = [System.Windows.Forms.Label]::new()
+$script:StatusLabel = $statusLabel
+$statusLabel.Text = "Ready."
+$statusLabel.Font = [System.Drawing.Font]::new("Segoe UI", 9)
+$statusLabel.AutoSize = $false
+$statusLabel.Location = [System.Drawing.Point]::new(22, 548)
+$statusLabel.Size = [System.Drawing.Size]::new(918, 42)
+$form.Controls.Add($statusLabel)
+
+Load-SelectedTools
+[void][System.Windows.Forms.Application]::Run($form)

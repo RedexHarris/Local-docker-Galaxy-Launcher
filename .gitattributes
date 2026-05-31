@@ -1,0 +1,12 @@
+# Keep checkout line endings stable even when core.autocrlf is enabled.
+* text=auto eol=lf
+
+# Binary artifacts must never be normalized.
+*.exe binary
+*.dll binary
+*.pdb binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
