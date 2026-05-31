@@ -425,7 +425,7 @@ function Stop-Galaxy {
 }
 
 function Clear-GalaxyData {
-    $message = "This will delete and purge Galaxy histories, datasets, outputs, and cancel active jobs. Installed tools will be kept. Continue?"
+    $message = "This will delete and purge Galaxy histories, datasets, outputs, active jobs, and generated files in the Docker volume. Installed tools will be kept. Continue?"
     $result = [System.Windows.Forms.MessageBox]::Show(
         $message,
         "Clear Galaxy Data",
@@ -462,12 +462,67 @@ function Clear-GalaxyData {
             "-GalaxyUrl",
             $GalaxyUrl,
             "-ApiKey",
-            $AdminApiKey
+            $AdminApiKey,
+            "-ContainerName",
+            $GalaxyContainerName
         )
 
         Set-Status "Galaxy data cleanup complete. Installed tools were kept."
         [System.Windows.Forms.MessageBox]::Show(
-            "Galaxy histories, job outputs, and files were cleaned. Installed tools were kept.",
+            "Galaxy histories, job outputs, generated files, and temporary files were cleaned. Installed tools were kept.",
+            "Local Galaxy Launcher",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information
+        ) | Out-Null
+    } catch {
+        Set-Status "Error: $($_.Exception.Message)"
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Local Galaxy Launcher", "OK", "Error") | Out-Null
+    } finally {
+        if ($script:ProgressBar) {
+            $script:ProgressBar.Style = "Blocks"
+        }
+    }
+}
+
+function Compact-DockerDisk {
+    $message = @"
+This will stop the Galaxy container, close Docker Desktop/WSL, and compact Docker Desktop virtual disk files.
+
+It will not delete Docker images, containers, volumes, Galaxy data, or installed tools. Docker will be stopped after compaction; use Start and open login when you want to run Galaxy again.
+
+Continue?
+"@
+    $result = [System.Windows.Forms.MessageBox]::Show(
+        $message,
+        "Compact Docker Disk",
+        [System.Windows.Forms.MessageBoxButtons]::YesNo,
+        [System.Windows.Forms.MessageBoxIcon]::Warning
+    )
+    if ($result -ne [System.Windows.Forms.DialogResult]::Yes) {
+        Set-Status "Docker disk compaction cancelled."
+        return
+    }
+
+    if ($script:ProgressBar) {
+        $script:ProgressBar.Style = "Marquee"
+    }
+    try {
+        $scriptPath = Join-Path $PSScriptRoot "Compact-DockerDisk.ps1"
+        Set-Status "Compacting Docker Desktop virtual disk. Administrator permission may be requested..."
+        Invoke-LoggedCommand -File "powershell" -Arguments @(
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            $scriptPath,
+            "-ProjectRoot",
+            $ProjectRoot
+        )
+
+        Update-ContainerStatus
+        Set-Status "Docker disk compaction complete. Start Galaxy again when needed."
+        [System.Windows.Forms.MessageBox]::Show(
+            "Docker Desktop virtual disk compaction is complete. Docker is stopped; start Galaxy again when you want to use the container.",
             "Local Galaxy Launcher",
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Information
@@ -669,6 +724,13 @@ $clearDataButton.Location = [System.Drawing.Point]::new(420, 166)
 $clearDataButton.Size = [System.Drawing.Size]::new(130, 34)
 $clearDataButton.Add_Click({ Clear-GalaxyData })
 $form.Controls.Add($clearDataButton)
+
+$compactDiskButton = [System.Windows.Forms.Button]::new()
+$compactDiskButton.Text = "Compact disk"
+$compactDiskButton.Location = [System.Drawing.Point]::new(562, 166)
+$compactDiskButton.Size = [System.Drawing.Size]::new(160, 34)
+$compactDiskButton.Add_Click({ Compact-DockerDisk })
+$form.Controls.Add($compactDiskButton)
 
 $toolsButton = [System.Windows.Forms.Button]::new()
 $toolsButton.Text = "Tools"

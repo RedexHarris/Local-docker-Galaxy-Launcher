@@ -13,7 +13,8 @@
 - 启动器、工具管理和日志窗口都不再依赖可见命令提示符窗口。
 - 启动器会显示当前 Galaxy 容器状态，例如 `running`、`exited`、`starting`，Docker Compose 的正常状态进度不会再弹成错误。
 - 提供工具管理界面：从 Galaxy Tool Shed 搜索官方工具仓库，勾选并点击 `Apply changes` 后通过 Galaxy 官方 API 增量安装，取消勾选后增量卸载。
-- 提供 `Clear data` 清理功能：删除并 purge Galaxy 历史记录、数据集、输出文件，并取消仍在运行的任务；不删除已安装工具。
+- 提供 `Clear data` 清理功能：删除并 purge Galaxy 历史记录、数据集、输出文件，清理 Docker volume 里的实际数据文件和任务临时目录，并取消仍在运行的任务；不删除已安装工具。
+- 提供 `Compact disk` 压缩功能：清理数据后可停止 Galaxy、关闭 Docker Desktop/WSL，并压缩 Docker Desktop 的 VHDX 虚拟磁盘，把已释放空间尽量还给 Windows；不删除镜像、容器、卷、Galaxy 数据或已安装工具。
 - `tools.selected.json` 保存当前选择，`tool_list.yml` 由 `scripts/Update-ToolList.ps1` 从 Galaxy Tool Shed 拉取最新可安装 revision 生成。
 
 ## 默认登录信息
@@ -61,7 +62,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-Launcher.ps1
 
 ## 清理任务和文件
 
-启动器中点击 `Clear data` 会先二次确认，然后通过 Galaxy API 清理历史记录、数据集、输出文件，并取消仍在排队或运行的任务。这个功能不会调用 Tool Shed 仓库删除接口，也不会清空 Docker volume，因此已安装工具会保留。
+启动器中点击 `Clear data` 会先二次确认，然后通过 Galaxy API 清理历史记录、数据集、输出文件，并取消仍在排队或运行的任务。随后它会进入容器清理 `/export/galaxy/database/files`、`/export/galaxy/database/job_working_directory`、`/export/galaxy/database/tmp` 和 `/export/galaxy/database/object_store_cache` 里的实际文件。这个功能不会调用 Tool Shed 仓库删除接口，也不会删除 `/export/galaxy/database/shed_tools`，因此已安装工具会保留。
+
+本项目的数据保存在 Docker named volume `local-usegalaxy_galaxy-export` 中，容器内路径是 `/export`。Docker 报告的卷挂载点通常是 `/var/lib/docker/volumes/local-usegalaxy_galaxy-export/_data`；在 Windows Docker Desktop 上它位于 Docker 的 Linux/WSL 虚拟磁盘中，而不是项目目录。清理后空间会先在 Docker 卷内释放并可被 Docker 复用；如果 Windows 资源管理器里的可用空间没有立刻变多，通常是 Docker Desktop 的虚拟磁盘还没有压缩。
+
+Docker Desktop 的虚拟磁盘不能在 Galaxy 运行清理时同步压缩：清理历史需要容器运行，而压缩 `docker_data.vhdx` 或 `ext4.vhdx` 需要停止 Docker Desktop/WSL。需要把 C 盘可用空间真正还给 Windows 时，先点击 `Clear data`，再点击 `Compact disk`。压缩过程可能请求管理员权限，会停止当前机器上的 Docker Desktop/WSL；它只压缩虚拟磁盘文件，不删除 Docker 镜像、容器、卷、Galaxy 数据或已安装工具。压缩完成后 Docker 会保持停止状态，下次点击 `Start and open login` 会按原状态继续启动容器。
 
 也可以先用 dry run 预览：
 
@@ -135,4 +140,3 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-Project.ps1
 - Galaxy Docker 镜像与用法：https://bgruening.github.io/docker-galaxy/
 - 官方扩展镜像和 `install-tools` 方法：https://bgruening.github.io/docker-galaxy/extending-the-docker-image.html
 - Galaxy Tool Shed：https://toolshed.g2.bx.psu.edu/
-

@@ -2,6 +2,8 @@
 param(
     [string]$GalaxyUrl = "http://localhost:8080",
     [string]$ApiKey = "local-usegalaxy-admin-key",
+    [string]$ContainerName = "local-usegalaxy",
+    [switch]$SkipFilesystemCleanup,
     [switch]$DryRun
 )
 
@@ -64,6 +66,55 @@ function Invoke-GalaxyApi {
     return Invoke-RestMethod @parameters
 }
 
+function Invoke-DockerExec {
+    param([string]$Command)
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $normalizedCommand = ($Command -replace "`r`n", "`n") -replace "`r", "`n"
+        $output = $normalizedCommand | & docker exec -i $ContainerName bash -c "tr -d '\r' | bash -s" 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    if ($exitCode -ne 0) {
+        $message = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+        if (-not $message) {
+            $message = "docker exec failed with exit code $exitCode."
+        }
+        throw $message
+    }
+
+    return $output
+}
+
+function Show-GeneratedFileSizes {
+    param([string]$Title)
+
+    $script = @'
+paths="
+/export/galaxy/database/files
+/export/galaxy/database/job_working_directory
+/export/galaxy/database/tmp
+/export/galaxy/database/object_store_cache
+/export/galaxy/database/objects
+/export/galaxy/database/short_term_storage
+"
+for path in $paths; do
+    if [ -e "$path" ]; then
+        du -sh "$path"
+    fi
+done
+count=$(find /export/galaxy/database/files /export/galaxy/database/job_working_directory /export/galaxy/database/tmp /export/galaxy/database/object_store_cache /export/galaxy/database/objects /export/galaxy/database/short_term_storage -type f 2>/dev/null | wc -l)
+echo "generated_file_count ${count}"
+'@
+
+    Write-Host $Title
+    Invoke-DockerExec -Command $script | ForEach-Object { Write-Host $_.ToString() }
+}
+
 function Get-UniqueHistories {
     $byId = @{}
 
@@ -87,7 +138,7 @@ function Get-UniqueHistories {
         }
     }
 
-    return ConvertTo-Array $byId.Values
+    return @($byId.Values | ForEach-Object { $_ })
 }
 
 function Get-HistoryContentCount {
@@ -148,10 +199,78 @@ function Remove-Histories {
     return $removed
 }
 
-Write-Host "Loading Galaxy histories and jobs from $GalaxyUrl"
-Write-Host "Cleanup scope: histories, datasets, dataset collections, and active jobs. Installed Tool Shed repositories are not touched."
+function Clear-GeneratedFiles {
+    if ($SkipFilesystemCleanup) {
+        Write-Host "Skipping Docker volume file cleanup."
+        return
+    }
 
-$histories = ConvertTo-Array (Get-UniqueHistories)
+    Show-GeneratedFileSizes -Title "Generated file sizes before filesystem cleanup:"
+
+    if ($DryRun) {
+        Write-Host "Dry run: would remove generated files from Galaxy object store, job working directory, temp directory, and object-store cache."
+        return
+    }
+
+    $cleanupScript = @'
+set -eu
+
+cleanup_dir() {
+    path="$1"
+    case "$path" in
+        /export/galaxy/database/files|\
+        /export/galaxy/database/job_working_directory|\
+        /export/galaxy/database/tmp|\
+        /export/galaxy/database/object_store_cache|\
+        /export/galaxy/database/objects|\
+        /export/galaxy/database/short_term_storage)
+            ;;
+        *)
+            echo "Refusing to clean unsafe path: $path" >&2
+            exit 2
+            ;;
+    esac
+
+    if [ -d "$path" ]; then
+        find "$path" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+    fi
+}
+
+cleanup_dir /export/galaxy/database/files
+cleanup_dir /export/galaxy/database/job_working_directory
+cleanup_dir /export/galaxy/database/tmp
+cleanup_dir /export/galaxy/database/object_store_cache
+cleanup_dir /export/galaxy/database/objects
+cleanup_dir /export/galaxy/database/short_term_storage
+
+install -d /export/galaxy/database/files
+install -d /export/galaxy/database/files/000
+install -d /export/galaxy/database/files/_metadata_files
+install -d /export/galaxy/database/job_working_directory
+install -d /export/galaxy/database/job_working_directory/000
+install -d /export/galaxy/database/tmp
+install -d /export/galaxy/database/object_store_cache
+
+if id galaxy >/dev/null 2>&1; then
+    chown -R galaxy:galaxy \
+        /export/galaxy/database/files \
+        /export/galaxy/database/job_working_directory \
+        /export/galaxy/database/tmp \
+        /export/galaxy/database/object_store_cache
+fi
+
+sync
+'@
+
+    Write-Host "Removing generated files from Docker volume path /export/galaxy/database. Installed tools are not touched."
+    Invoke-DockerExec -Command $cleanupScript | ForEach-Object { Write-Host $_.ToString() }
+    Show-GeneratedFileSizes -Title "Generated file sizes after filesystem cleanup:"
+}
+
+Write-Host "Loading Galaxy histories and jobs from $GalaxyUrl"
+Write-Host "Cleanup scope: histories, datasets, dataset collections, active jobs, object-store files, job working files, temp files, and object-store cache. Installed Tool Shed repositories are not touched."
+
+$histories = @(Get-UniqueHistories)
 $contentCount = 0
 foreach ($history in $histories) {
     $contentCount += Get-HistoryContentCount -HistoryId ([string]$history.id)
@@ -160,9 +279,10 @@ foreach ($history in $histories) {
 Write-Host ("Cleanup preview: {0} histories and {1} history items." -f $histories.Count, $contentCount)
 $cancelledJobs = Stop-ActiveJobs
 $removedHistories = Remove-Histories -Histories $histories
+Clear-GeneratedFiles
 
 if ($DryRun) {
-    Write-Host ("Dry run complete. Would cancel {0} active jobs and purge {1} histories." -f $cancelledJobs, $histories.Count)
+    Write-Host ("Dry run complete. Would cancel {0} active jobs, purge {1} histories, and remove generated files from the Docker volume." -f $cancelledJobs, $histories.Count)
 } else {
-    Write-Host ("Galaxy data cleanup complete. Cancelled jobs: {0}. Purged histories: {1}." -f $cancelledJobs, $removedHistories)
+    Write-Host ("Galaxy data cleanup complete. Cancelled jobs: {0}. Purged histories: {1}. Generated files were removed from the Docker volume." -f $cancelledJobs, $removedHistories)
 }
