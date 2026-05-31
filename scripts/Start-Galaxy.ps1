@@ -516,7 +516,9 @@ Continue?
             "-File",
             $scriptPath,
             "-ProjectRoot",
-            $ProjectRoot
+            $ProjectRoot,
+            "-HelperImage",
+            $GalaxyImage
         )
 
         Update-ContainerStatus

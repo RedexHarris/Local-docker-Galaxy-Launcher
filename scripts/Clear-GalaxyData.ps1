@@ -232,6 +232,11 @@ cleanup_dir() {
     esac
 
     if [ -d "$path" ]; then
+        if command -v shred >/dev/null 2>&1; then
+            find "$path" -type f -exec shred -n 0 -z -u -- {} +
+        else
+            find "$path" -type f -exec rm -f -- {} +
+        fi
         find "$path" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
     fi
 }
@@ -262,7 +267,7 @@ fi
 sync
 '@
 
-    Write-Host "Removing generated files from Docker volume path /export/galaxy/database. Installed tools are not touched."
+    Write-Host "Zeroing and removing generated files from Docker volume path /export/galaxy/database. Installed tools are not touched."
     Invoke-DockerExec -Command $cleanupScript | ForEach-Object { Write-Host $_.ToString() }
     Show-GeneratedFileSizes -Title "Generated file sizes after filesystem cleanup:"
 }

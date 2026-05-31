@@ -3,6 +3,7 @@ param(
     [string]$ProjectRoot,
     [string]$VhdxPath,
     [string]$LogPath,
+    [string]$HelperImage = "local-usegalaxy:latest",
     [switch]$Elevated,
     [switch]$DryRun
 )
@@ -31,6 +32,9 @@ function Write-Step {
 function Format-Size {
     param([long]$Bytes)
 
+    if ($Bytes -lt 0) {
+        return "-" + (Format-Size (-1 * $Bytes))
+    }
     if ($Bytes -ge 1GB) {
         return ("{0:N2} GB" -f ($Bytes / 1GB))
     }
@@ -79,6 +83,9 @@ function Invoke-ElevatedSelf {
     )
     if ($VhdxPath) {
         $arguments += @("-VhdxPath", (Quote-Argument $VhdxPath))
+    }
+    if ($HelperImage) {
+        $arguments += @("-HelperImage", (Quote-Argument $HelperImage))
     }
     if ($DryRun) {
         $arguments += "-DryRun"
@@ -150,6 +157,50 @@ function Stop-GalaxyContainerIfPossible {
     }
 }
 
+function Invoke-DockerHostTrim {
+    if (-not (Test-DockerDaemon)) {
+        Write-Step "Docker daemon is not running; skipping Docker host fstrim."
+        return
+    }
+
+    if (-not $HelperImage) {
+        Write-Step "No helper image was provided; skipping Docker host fstrim."
+        return
+    }
+
+    & docker image inspect $HelperImage *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Step "Helper image $HelperImage was not found; skipping Docker host fstrim."
+        return
+    }
+
+    $trimScript = @'
+set -eu
+if ! command -v nsenter >/dev/null 2>&1 || ! command -v fstrim >/dev/null 2>&1; then
+    echo "nsenter or fstrim is not available in the helper image."
+    exit 42
+fi
+nsenter -t 1 -m -u -n -i sh -lc 'df -hT /mnt/docker-desktop-disk /var/lib/docker 2>/dev/null || true; fstrim -av'
+'@
+
+    Write-Step "Trimming free blocks inside the Docker Desktop data disk before VHDX compaction."
+    try {
+        Invoke-Native -File "docker" -Arguments @(
+            "run",
+            "--rm",
+            "--privileged",
+            "--pid=host",
+            "--entrypoint",
+            "bash",
+            $HelperImage,
+            "-lc",
+            $trimScript
+        )
+    } catch {
+        Write-Step "Docker host fstrim failed; VHDX compaction will continue. Reason: $($_.Exception.Message)"
+    }
+}
+
 function Stop-DockerDesktopProcesses {
     $processNames = @(
         "Docker Desktop",
@@ -171,6 +222,23 @@ function Stop-DockerDesktopProcesses {
         Write-Step "Stopping process $($process.ProcessName) (PID $($process.Id))."
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Wait-WslStopped {
+    if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
+        return
+    }
+
+    for ($i = 1; $i -le 30; $i++) {
+        $running = @(& wsl.exe --list --running --quiet 2>$null | Where-Object { $_ -and $_.ToString().Trim() })
+        if (-not $running) {
+            Write-Step "WSL reports no running distributions."
+            return
+        }
+        Start-Sleep -Seconds 1
+    }
+
+    Write-Step "WSL still reports running distributions; VHDX compaction may reclaim less space."
 }
 
 function Get-DockerVhdxPaths {
@@ -219,6 +287,35 @@ exit
     }
 }
 
+function Invoke-OptimizeVhdModes {
+    param([string]$Path)
+
+    if (-not (Get-Command Optimize-VHD -ErrorAction SilentlyContinue)) {
+        return $false
+    }
+
+    $anySucceeded = $false
+    foreach ($mode in @("Full", "Pretrimmed", "Quick")) {
+        $modeBefore = (Get-Item -LiteralPath $Path).Length
+        Write-Step "Using Optimize-VHD -Mode $mode."
+        try {
+            Optimize-VHD -Path $Path -Mode $mode
+            $anySucceeded = $true
+        } catch {
+            Write-Step "Optimize-VHD -Mode $mode failed: $($_.Exception.Message)"
+            continue
+        }
+
+        $modeAfter = (Get-Item -LiteralPath $Path).Length
+        Write-Step "Mode $mode reclaimed: $(Format-Size ($modeBefore - $modeAfter))"
+        if ($modeAfter -lt $modeBefore) {
+            break
+        }
+    }
+
+    return $anySucceeded
+}
+
 function Invoke-CompactVhdx {
     param([string]$Path)
 
@@ -236,17 +333,26 @@ function Invoke-CompactVhdx {
         return
     }
 
-    if (Get-Command Optimize-VHD -ErrorAction SilentlyContinue) {
-        Write-Step "Using Optimize-VHD."
-        Optimize-VHD -Path $Path -Mode Full
-    } else {
+    $optimized = Invoke-OptimizeVhdModes -Path $Path
+    $afterOptimize = (Get-Item -LiteralPath $Path).Length
+    if (-not $optimized) {
         Write-Step "Optimize-VHD is not available; using diskpart compact vdisk."
         Invoke-DiskpartCompact -Path $Path
+    } elseif ($afterOptimize -ge $before) {
+        Write-Step "Optimize-VHD did not reclaim space; trying diskpart compact vdisk as a fallback."
+        try {
+            Invoke-DiskpartCompact -Path $Path
+        } catch {
+            Write-Step "diskpart compact vdisk fallback failed: $($_.Exception.Message)"
+        }
     }
 
     $after = (Get-Item -LiteralPath $Path).Length
     Write-Step "Size after: $(Format-Size $after)"
     Write-Step "Reclaimed: $(Format-Size ($before - $after))"
+    if ($after -ge $before) {
+        Write-Step "No VHDX blocks were reclaimed. The disk may still contain non-zero free blocks from files deleted before zero-on-delete cleanup was added, or Docker/WSL may still have the disk mounted."
+    }
 }
 
 if (-not $IsWindows -and $PSVersionTable.PSEdition -eq "Core") {
@@ -265,13 +371,15 @@ Write-Step "Starting Docker Desktop virtual disk compaction."
 Write-Step "Project root: $ProjectRoot"
 
 if ($DryRun) {
-    Write-Step "Dry run: would stop the Galaxy container, close Docker Desktop, and run wsl.exe --shutdown before compacting."
+    Write-Step "Dry run: would stop the Galaxy container, trim Docker host free blocks, close Docker Desktop, run wsl.exe --shutdown, and compact VHDX files."
 } else {
     Stop-GalaxyContainerIfPossible
+    Invoke-DockerHostTrim
     Stop-DockerDesktopProcesses
 
     if (Get-Command wsl.exe -ErrorAction SilentlyContinue) {
         Invoke-Native -File "wsl.exe" -Arguments @("--shutdown")
+        Wait-WslStopped
         Start-Sleep -Seconds 5
     } else {
         Write-Step "wsl.exe was not found. Docker Desktop VHDX may still be mounted."
