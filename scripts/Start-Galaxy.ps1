@@ -75,6 +75,43 @@ function Set-Status {
     }
 }
 
+function ConvertTo-ProcessArgument {
+    param([string]$Value)
+
+    if ($null -eq $Value -or $Value.Length -eq 0) {
+        return '""'
+    }
+    if ($Value -notmatch '\s|"') {
+        return $Value
+    }
+
+    $builder = [System.Text.StringBuilder]::new()
+    [void]$builder.Append('"')
+    $backslashes = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashes++
+            continue
+        }
+        if ($character -eq '"') {
+            [void]$builder.Append([string]::new([char]92, ($backslashes * 2 + 1)))
+            [void]$builder.Append('"')
+            $backslashes = 0
+            continue
+        }
+        if ($backslashes -gt 0) {
+            [void]$builder.Append([string]::new([char]92, $backslashes))
+            $backslashes = 0
+        }
+        [void]$builder.Append($character)
+    }
+    if ($backslashes -gt 0) {
+        [void]$builder.Append([string]::new([char]92, ($backslashes * 2)))
+    }
+    [void]$builder.Append('"')
+    return $builder.ToString()
+}
+
 function Invoke-LoggedCommand {
     param(
         [string]$File,
@@ -82,18 +119,73 @@ function Invoke-LoggedCommand {
     )
 
     Add-Log ("> {0} {1}" -f $File, ($Arguments -join " "))
-    $previousErrorActionPreference = $ErrorActionPreference
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $File
+    $startInfo.Arguments = (($Arguments | ForEach-Object { ConvertTo-ProcessArgument -Value ([string]$_) }) -join " ")
+    $startInfo.WorkingDirectory = (Get-Location).Path
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.EnvironmentVariables["BUILDKIT_PROGRESS"] = "plain"
+    $startInfo.EnvironmentVariables["NO_COLOR"] = "1"
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
     try {
-        # Docker Compose writes normal lifecycle progress to stderr. Capture it
-        # as command output so "Container ... Starting" is not treated as an error.
-        $ErrorActionPreference = "Continue"
-        $output = & $File @Arguments 2>&1
-        $exitCode = $LASTEXITCODE
+        if (-not $process.Start()) {
+            throw "Could not start command: $File"
+        }
+
+        $outputDone = $false
+        $errorDone = $false
+        $startedAt = Get-Date
+        $lastOutputAt = $startedAt
+        $lastHeartbeatAt = $startedAt
+        $outputTask = $process.StandardOutput.ReadLineAsync()
+        $errorTask = $process.StandardError.ReadLineAsync()
+        while (-not ($process.HasExited -and $outputDone -and $errorDone)) {
+            if (-not $outputDone -and $outputTask.IsCompleted) {
+                $line = $outputTask.Result
+                if ($null -eq $line) {
+                    $outputDone = $true
+                } else {
+                    Add-Log $line
+                    $lastOutputAt = Get-Date
+                    $outputTask = $process.StandardOutput.ReadLineAsync()
+                }
+            }
+            if (-not $errorDone -and $errorTask.IsCompleted) {
+                $line = $errorTask.Result
+                if ($null -eq $line) {
+                    $errorDone = $true
+                } else {
+                    Add-Log $line
+                    $lastOutputAt = Get-Date
+                    $errorTask = $process.StandardError.ReadLineAsync()
+                }
+            }
+            $now = Get-Date
+            if (($now - $lastOutputAt).TotalSeconds -ge 30 -and ($now - $lastHeartbeatAt).TotalSeconds -ge 30) {
+                $elapsedMinutes = [math]::Round(($now - $startedAt).TotalMinutes, 1)
+                $heartbeat = "Command is still running... elapsed $elapsedMinutes min."
+                Add-Log $heartbeat
+                if ($script:StatusLabel) {
+                    $script:StatusLabel.Text = $heartbeat
+                }
+                $lastHeartbeatAt = $now
+            }
+            if ($script:Form) {
+                [System.Windows.Forms.Application]::DoEvents()
+            }
+            Start-Sleep -Milliseconds 50
+        }
+        $process.WaitForExit()
+        $exitCode = $process.ExitCode
     } finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
-    foreach ($item in ($output | Where-Object { $_ })) {
-        Add-Log ($item.ToString())
+        $process.Dispose()
     }
     if ($exitCode -ne 0) {
         throw "Command failed with exit code ${exitCode}: $File $($Arguments -join ' ')"
@@ -187,7 +279,11 @@ function Invoke-Compose {
     Push-Location $ProjectRoot
     try {
         if (Test-DockerComposePlugin) {
-            Invoke-LoggedCommand -File "docker" -Arguments (@("compose") + $Arguments)
+            $composeArguments = @("compose")
+            if ($Arguments.Count -gt 0 -and $Arguments[0] -eq "build") {
+                $composeArguments += @("--progress", "plain")
+            }
+            Invoke-LoggedCommand -File "docker" -Arguments ($composeArguments + $Arguments)
         } elseif (Test-Executable "docker-compose") {
             Invoke-LoggedCommand -File "docker-compose" -Arguments $Arguments
         } else {
@@ -211,7 +307,7 @@ function Ensure-GalaxyImage {
         return
     }
 
-    Set-Status "Galaxy image is missing. Building it once..."
+    Set-Status "Galaxy image is missing. First build is running; live progress appears below..."
     Invoke-Compose @("build", "galaxy")
     if (-not (Test-DockerImage -ImageName $GalaxyImage)) {
         throw "Docker build completed, but the expected Galaxy image '$GalaxyImage' was not created. Check launcher.log for the build output."

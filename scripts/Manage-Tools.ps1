@@ -326,42 +326,133 @@ function Test-NativeCommand {
     return ($exitCode -eq 0)
 }
 
+function ConvertTo-ProcessArgument {
+    param([string]$Value)
+
+    if ($null -eq $Value -or $Value.Length -eq 0) {
+        return '""'
+    }
+    if ($Value -notmatch '\s|"') {
+        return $Value
+    }
+
+    $builder = [System.Text.StringBuilder]::new()
+    [void]$builder.Append('"')
+    $backslashes = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashes++
+            continue
+        }
+        if ($character -eq '"') {
+            [void]$builder.Append([string]::new([char]92, ($backslashes * 2 + 1)))
+            [void]$builder.Append('"')
+            $backslashes = 0
+            continue
+        }
+        if ($backslashes -gt 0) {
+            [void]$builder.Append([string]::new([char]92, $backslashes))
+            $backslashes = 0
+        }
+        [void]$builder.Append($character)
+    }
+    if ($backslashes -gt 0) {
+        [void]$builder.Append([string]::new([char]92, ($backslashes * 2)))
+    }
+    [void]$builder.Append('"')
+    return $builder.ToString()
+}
+
+function Invoke-LoggedCommand {
+    param(
+        [string]$File,
+        [string[]]$Arguments
+    )
+
+    Add-Log ("> {0} {1}" -f $File, ($Arguments -join " "))
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $File
+    $startInfo.Arguments = (($Arguments | ForEach-Object { ConvertTo-ProcessArgument -Value ([string]$_) }) -join " ")
+    $startInfo.WorkingDirectory = (Get-Location).Path
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.EnvironmentVariables["BUILDKIT_PROGRESS"] = "plain"
+    $startInfo.EnvironmentVariables["NO_COLOR"] = "1"
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) {
+            throw "Could not start command: $File"
+        }
+
+        $outputDone = $false
+        $errorDone = $false
+        $startedAt = Get-Date
+        $lastOutputAt = $startedAt
+        $lastHeartbeatAt = $startedAt
+        $outputTask = $process.StandardOutput.ReadLineAsync()
+        $errorTask = $process.StandardError.ReadLineAsync()
+        while (-not ($process.HasExited -and $outputDone -and $errorDone)) {
+            if (-not $outputDone -and $outputTask.IsCompleted) {
+                $line = $outputTask.Result
+                if ($null -eq $line) {
+                    $outputDone = $true
+                } else {
+                    Add-Log $line
+                    $lastOutputAt = Get-Date
+                    $outputTask = $process.StandardOutput.ReadLineAsync()
+                }
+            }
+            if (-not $errorDone -and $errorTask.IsCompleted) {
+                $line = $errorTask.Result
+                if ($null -eq $line) {
+                    $errorDone = $true
+                } else {
+                    Add-Log $line
+                    $lastOutputAt = Get-Date
+                    $errorTask = $process.StandardError.ReadLineAsync()
+                }
+            }
+            $now = Get-Date
+            if (($now - $lastOutputAt).TotalSeconds -ge 30 -and ($now - $lastHeartbeatAt).TotalSeconds -ge 30) {
+                $elapsedMinutes = [math]::Round(($now - $startedAt).TotalMinutes, 1)
+                Add-Log "Command is still running... elapsed $elapsedMinutes min."
+                $lastHeartbeatAt = $now
+            }
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 50
+        }
+        $process.WaitForExit()
+        $exitCode = $process.ExitCode
+    } finally {
+        $process.Dispose()
+    }
+    if ($exitCode -ne 0) {
+        throw "Command failed with exit code ${exitCode}: $File $($Arguments -join ' ')"
+    }
+}
+
 function Invoke-Compose {
     param([string[]]$Arguments)
 
     Push-Location $ProjectRoot
     try {
         if (Test-Executable "docker") {
-            & docker compose version *> $null
-            if ($LASTEXITCODE -eq 0) {
-                $previousErrorActionPreference = $ErrorActionPreference
-                try {
-                    $ErrorActionPreference = "Continue"
-                    $output = & docker compose @Arguments 2>&1
-                    $exitCode = $LASTEXITCODE
-                } finally {
-                    $ErrorActionPreference = $previousErrorActionPreference
+            if (Test-NativeCommand -File "docker" -Arguments @("compose", "version")) {
+                $composeArguments = @("compose")
+                if ($Arguments.Count -gt 0 -and $Arguments[0] -eq "build") {
+                    $composeArguments += @("--progress", "plain")
                 }
-                $output | Where-Object { $_ } | ForEach-Object { Add-Log ($_.ToString()) }
-                if ($exitCode -ne 0) {
-                    throw "docker compose failed."
-                }
+                Invoke-LoggedCommand -File "docker" -Arguments ($composeArguments + $Arguments)
                 return
             }
         }
         if (Test-Executable "docker-compose") {
-            $previousErrorActionPreference = $ErrorActionPreference
-            try {
-                $ErrorActionPreference = "Continue"
-                $output = & docker-compose @Arguments 2>&1
-                $exitCode = $LASTEXITCODE
-            } finally {
-                $ErrorActionPreference = $previousErrorActionPreference
-            }
-            $output | Where-Object { $_ } | ForEach-Object { Add-Log ($_.ToString()) }
-            if ($exitCode -ne 0) {
-                throw "docker-compose failed."
-            }
+            Invoke-LoggedCommand -File "docker-compose" -Arguments $Arguments
             return
         }
         throw "Docker Compose was not found."
@@ -384,7 +475,7 @@ function Ensure-GalaxyImage {
         return
     }
 
-    Add-Log "Galaxy image is missing. Building it once..."
+    Add-Log "Galaxy image is missing. First build is running; live progress is being logged..."
     Invoke-Compose @("build", "galaxy")
     if (-not (Test-DockerImage -ImageName $imageName)) {
         throw "Docker build completed, but the expected Galaxy image '$imageName' was not created. Check tool-manager.log for the build output."

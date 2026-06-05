@@ -58,7 +58,7 @@ bash start-galaxy.sh
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-Launcher.ps1
 ```
 
-第一次启动会拉取基础镜像、安装 Tool Shed 工具和 Conda 依赖，可能需要较长时间和较大磁盘空间。后续启动会复用已构建镜像和持久化数据。
+第一次启动会拉取基础镜像、安装 Tool Shed 工具和 Conda 依赖，可能需要几十分钟或更久，并占用较大磁盘空间。启动器日志框会实时显示 Docker 构建进度；如果命令超过 30 秒没有输出，也会显示持续运行时间。后续启动会复用已构建镜像和持久化数据。
 
 如果启动器检测不到 Docker，会询问是否打开 Docker Desktop 下载页：https://www.docker.com/get-started/
 
