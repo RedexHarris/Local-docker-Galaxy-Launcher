@@ -106,20 +106,37 @@ function Test-Executable {
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
+function Test-NativeCommand {
+    param(
+        [string]$File,
+        [string[]]$Arguments = @()
+    )
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $File @Arguments *> $null
+        $exitCode = $LASTEXITCODE
+    } catch {
+        $exitCode = 1
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    return ($exitCode -eq 0)
+}
+
 function Test-DockerComposePlugin {
     if (-not (Test-Executable "docker")) {
         return $false
     }
-    & docker compose version *> $null
-    return ($LASTEXITCODE -eq 0)
+    return Test-NativeCommand -File "docker" -Arguments @("compose", "version")
 }
 
 function Test-DockerDaemon {
     if (-not (Test-Executable "docker")) {
         return $false
     }
-    & docker info *> $null
-    return ($LASTEXITCODE -eq 0)
+    return Test-NativeCommand -File "docker" -Arguments @("info")
 }
 
 function Get-GalaxyContainerStatus {
@@ -184,8 +201,7 @@ function Invoke-Compose {
 function Test-DockerImage {
     param([string]$ImageName)
 
-    & docker image inspect $ImageName *> $null
-    return ($LASTEXITCODE -eq 0)
+    return Test-NativeCommand -File "docker" -Arguments @("image", "inspect", $ImageName)
 }
 
 function Ensure-GalaxyImage {
@@ -196,7 +212,11 @@ function Ensure-GalaxyImage {
     }
 
     Set-Status "Galaxy image is missing. Building it once..."
-    Invoke-Compose @("build")
+    Invoke-Compose @("build", "galaxy")
+    if (-not (Test-DockerImage -ImageName $GalaxyImage)) {
+        throw "Docker build completed, but the expected Galaxy image '$GalaxyImage' was not created. Check launcher.log for the build output."
+    }
+    Set-Status "Galaxy image build complete."
 }
 
 function Start-DockerDesktopIfAvailable {

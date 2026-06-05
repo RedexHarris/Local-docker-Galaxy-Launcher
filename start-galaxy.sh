@@ -43,7 +43,11 @@ fi
 
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   echo "Galaxy image is missing. Building it once..."
-  "${COMPOSE[@]}" build
+  "${COMPOSE[@]}" build galaxy
+  if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    echo "Docker build completed, but the expected Galaxy image '$IMAGE' was not created."
+    exit 1
+  fi
 fi
 
 "${COMPOSE[@]}" up -d --no-build
