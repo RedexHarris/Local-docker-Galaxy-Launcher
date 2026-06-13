@@ -50,11 +50,6 @@
         "section":  "Serotyping"
     },
     {
-        "name":  "shovill",
-        "owner":  "iuc",
-        "section":  "Tools"
-    },
-    {
         "name":  "snippy",
         "owner":  "iuc",
         "section":  "Variant Calling"
