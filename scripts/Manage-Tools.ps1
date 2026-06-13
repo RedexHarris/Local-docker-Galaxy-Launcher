@@ -2,7 +2,8 @@
 param(
     [string]$ToolShedUrl = "https://toolshed.g2.bx.psu.edu",
     [string]$SelectionPath,
-    [string]$ProjectRoot
+    [string]$ProjectRoot,
+    [int]$ParentProcessId = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,6 +25,10 @@ $script:Grid = $null
 $script:StatusLabel = $null
 $script:SearchBox = $null
 $script:RowKeys = @{}
+$script:ApplyProgressBar = $null
+$script:ApplyButton = $null
+$script:SearchButton = $null
+$script:CurrentCommandProcess = $null
 
 function ConvertTo-Array {
     param([object]$Value)
@@ -36,11 +41,40 @@ function ConvertTo-Array {
     return @($Value)
 }
 
+function Set-ApplyProgress {
+    param(
+        [int]$Percent,
+        [string]$Message,
+        [switch]$Marquee
+    )
+
+    if ($script:ApplyProgressBar) {
+        if ($Marquee) {
+            $script:ApplyProgressBar.Style = "Marquee"
+        } else {
+            $script:ApplyProgressBar.Style = "Blocks"
+            $script:ApplyProgressBar.Value = [Math]::Max(0, [Math]::Min(100, $Percent))
+        }
+    }
+    if ($script:StatusLabel -and $Message) {
+        $script:StatusLabel.Text = $Message
+    }
+    [System.Windows.Forms.Application]::DoEvents()
+}
+
 function Add-Log {
     param([string]$Message)
     $stamp = (Get-Date).ToString("HH:mm:ss")
     $line = "[$stamp] $Message"
     Add-Content -Path $LogFile -Value $line -Encoding UTF8
+    if ($Message -match '^Progress\s+(\d+)/(\d+):\s*(.*)$') {
+        $current = [int]$Matches[1]
+        $total = [int]$Matches[2]
+        $progressMessage = $Matches[3]
+        $percent = if ($total -gt 0) { [int][Math]::Round(($current / $total) * 100) } else { 100 }
+        Set-ApplyProgress -Percent $percent -Message ("{0} ({1}/{2})" -f $progressMessage, $current, $total)
+        return
+    }
     if ($script:StatusLabel) {
         $script:StatusLabel.Text = $Message
         [System.Windows.Forms.Application]::DoEvents()
@@ -138,7 +172,7 @@ function Write-PendingRemovedTools {
     }
 
     $json = $items | ConvertTo-Json -Depth 6
-    [System.IO.File]::WriteAllText($RemovedPath, $json + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText($RemovedPath, (($json -replace "`r`n", "`n") -replace "`r", "`n") + "`n", [System.Text.UTF8Encoding]::new($false))
 }
 
 function Add-ToolRow {
@@ -288,17 +322,20 @@ function Save-Selection {
     if (-not $json) {
         $json = "[]"
     }
-    [System.IO.File]::WriteAllText($SelectionPath, $json + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText($SelectionPath, (($json -replace "`r`n", "`n") -replace "`r", "`n") + "`n", [System.Text.UTF8Encoding]::new($false))
     Add-Log ("Saved {0} selected tools." -f (ConvertTo-Array $selected).Count)
 
     $scriptPath = Join-Path $PSScriptRoot "Update-ToolList.ps1"
     Add-Log "Regenerating tool_list.yml..."
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -SelectionPath $SelectionPath 2>&1 | ForEach-Object {
-        Add-Log ($_.ToString())
-    }
-    if ($LASTEXITCODE -ne 0) {
-        throw "Update-ToolList.ps1 failed."
-    }
+    Invoke-LoggedCommand -File "powershell" -Arguments @(
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        $scriptPath,
+        "-SelectionPath",
+        $SelectionPath
+    )
     Add-Log "tool_list.yml regenerated."
 }
 
@@ -388,6 +425,7 @@ function Invoke-LoggedCommand {
         if (-not $process.Start()) {
             throw "Could not start command: $File"
         }
+        $script:CurrentCommandProcess = $process
 
         $outputDone = $false
         $errorDone = $false
@@ -429,6 +467,9 @@ function Invoke-LoggedCommand {
         $process.WaitForExit()
         $exitCode = $process.ExitCode
     } finally {
+        if ($script:CurrentCommandProcess -eq $process) {
+            $script:CurrentCommandProcess = $null
+        }
         $process.Dispose()
     }
     if ($exitCode -ne 0) {
@@ -509,24 +550,58 @@ function Wait-GalaxyReady {
 }
 
 function Apply-ToolChanges {
-    Save-Selection
-    Ensure-GalaxyImage
-    Add-Log "Starting Galaxy without rebuilding the image..."
-    Invoke-Compose @("up", "-d", "--no-build")
-    Wait-GalaxyReady
-    $syncScript = Join-Path $PSScriptRoot "Sync-GalaxyTools.ps1"
-    $config = Read-DotEnv
-    $port = if ($config.GALAXY_PORT) { $config.GALAXY_PORT } else { "8080" }
-    $apiKey = if ($config.GALAXY_ADMIN_API_KEY) { $config.GALAXY_ADMIN_API_KEY } else { "local-usegalaxy-admin-key" }
-    $galaxyUrl = "http://localhost:$port"
-    $metadataPath = Join-Path $ProjectRoot "tool_list.metadata.json"
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $syncScript -GalaxyUrl $galaxyUrl -ApiKey $apiKey -SelectionPath $SelectionPath -MetadataPath $metadataPath -RemovedPath $RemovedPath -ReconcileInstalledWithSelection 2>&1 | ForEach-Object {
-        Add-Log ($_.ToString())
+    if ($script:ApplyButton) {
+        $script:ApplyButton.Enabled = $false
     }
-    if ($LASTEXITCODE -ne 0) {
-        throw "Sync-GalaxyTools.ps1 failed. See tool-manager.log for details."
+    if ($script:SearchButton) {
+        $script:SearchButton.Enabled = $false
     }
-    Add-Log "Tool changes were applied. Refresh the Galaxy browser tab if it was already open."
+
+    try {
+        Set-ApplyProgress -Percent 0 -Message "Saving tool selection..."
+        Save-Selection
+        Set-ApplyProgress -Percent 15 -Message "Checking Galaxy Docker image..."
+        Ensure-GalaxyImage
+        Set-ApplyProgress -Percent 30 -Message "Starting Galaxy without rebuilding the image..."
+        Add-Log "Starting Galaxy without rebuilding the image..."
+        Invoke-Compose @("up", "-d", "--no-build")
+        Set-ApplyProgress -Percent 40 -Message "Waiting for Galaxy to become ready..."
+        Wait-GalaxyReady
+        Set-ApplyProgress -Percent 45 -Message "Applying selected tool changes..."
+        $syncScript = Join-Path $PSScriptRoot "Sync-GalaxyTools.ps1"
+        $config = Read-DotEnv
+        $port = if ($config.GALAXY_PORT) { $config.GALAXY_PORT } else { "8080" }
+        $apiKey = if ($config.GALAXY_ADMIN_API_KEY) { $config.GALAXY_ADMIN_API_KEY } else { "local-usegalaxy-admin-key" }
+        $galaxyUrl = "http://localhost:$port"
+        $metadataPath = Join-Path $ProjectRoot "tool_list.metadata.json"
+        Invoke-LoggedCommand -File "powershell" -Arguments @(
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            $syncScript,
+            "-GalaxyUrl",
+            $galaxyUrl,
+            "-ApiKey",
+            $apiKey,
+            "-SelectionPath",
+            $SelectionPath,
+            "-MetadataPath",
+            $metadataPath,
+            "-RemovedPath",
+            $RemovedPath,
+            "-ReconcileInstalledWithSelection"
+        )
+        Set-ApplyProgress -Percent 100 -Message "Tool changes were applied. Refresh the Galaxy browser tab if it was already open."
+        Add-Log "Tool changes were applied. Refresh the Galaxy browser tab if it was already open."
+    } finally {
+        if ($script:ApplyButton) {
+            $script:ApplyButton.Enabled = $true
+        }
+        if ($script:SearchButton) {
+            $script:SearchButton.Enabled = $true
+        }
+    }
 }
 
 try {
@@ -568,6 +643,7 @@ $searchBox.Text = "kraken2"
 $form.Controls.Add($searchBox)
 
 $searchButton = [System.Windows.Forms.Button]::new()
+$script:SearchButton = $searchButton
 $searchButton.Text = "Search Tool Shed"
 $searchButton.Location = [System.Drawing.Point]::new(354, 80)
 $searchButton.Size = [System.Drawing.Size]::new(140, 30)
@@ -582,6 +658,7 @@ $searchButton.Add_Click({
 $form.Controls.Add($searchButton)
 
 $applyButton = [System.Windows.Forms.Button]::new()
+$script:ApplyButton = $applyButton
 $applyButton.Text = "Apply changes"
 $applyButton.Location = [System.Drawing.Point]::new(506, 80)
 $applyButton.Size = [System.Drawing.Size]::new(150, 30)
@@ -641,14 +718,49 @@ foreach ($columnInfo in @(
 
 $form.Controls.Add($grid)
 
+$applyProgressBar = [System.Windows.Forms.ProgressBar]::new()
+$script:ApplyProgressBar = $applyProgressBar
+$applyProgressBar.Location = [System.Drawing.Point]::new(22, 540)
+$applyProgressBar.Size = [System.Drawing.Size]::new(918, 14)
+$applyProgressBar.Minimum = 0
+$applyProgressBar.Maximum = 100
+$applyProgressBar.Value = 0
+$applyProgressBar.Style = "Blocks"
+$form.Controls.Add($applyProgressBar)
+
 $statusLabel = [System.Windows.Forms.Label]::new()
 $script:StatusLabel = $statusLabel
 $statusLabel.Text = "Ready."
 $statusLabel.Font = [System.Drawing.Font]::new("Segoe UI", 9)
 $statusLabel.AutoSize = $false
-$statusLabel.Location = [System.Drawing.Point]::new(22, 548)
-$statusLabel.Size = [System.Drawing.Size]::new(918, 42)
+$statusLabel.Location = [System.Drawing.Point]::new(22, 560)
+$statusLabel.Size = [System.Drawing.Size]::new(918, 32)
 $form.Controls.Add($statusLabel)
+
+$form.Add_FormClosing({
+    if ($script:CurrentCommandProcess -and -not $script:CurrentCommandProcess.HasExited) {
+        try {
+            $script:CurrentCommandProcess.Kill()
+        } catch {
+        }
+    }
+})
+
+if ($ParentProcessId -gt 0) {
+    $parentTimer = [System.Windows.Forms.Timer]::new()
+    $parentTimer.Interval = 2000
+    $parentTimer.Add_Tick({
+        if (-not (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue)) {
+            $parentTimer.Stop()
+            $form.Close()
+        }
+    })
+    $parentTimer.Start()
+    $form.Add_FormClosed({
+        $parentTimer.Stop()
+        $parentTimer.Dispose()
+    })
+}
 
 Load-SelectedTools
 [void][System.Windows.Forms.Application]::Run($form)

@@ -3,7 +3,8 @@ param(
     [string]$ToolShedUrl = "https://toolshed.g2.bx.psu.edu",
     [string]$SelectionPath,
     [string]$OutputPath,
-    [string]$MetadataPath
+    [string]$MetadataPath,
+    [switch]$ForceResolve
 )
 
 $ErrorActionPreference = "Stop"
@@ -117,25 +118,72 @@ function Read-SelectedRepositories {
     return $repositories
 }
 
+function Get-RepositoryKey {
+    param(
+        [string]$Owner,
+        [string]$Name
+    )
+    return ("{0}/{1}" -f $Owner, $Name).ToLowerInvariant()
+}
+
+function Get-CachedMetadataByKey {
+    param([string]$Path)
+
+    $cache = @{}
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    if (-not (Test-Path $fullPath)) {
+        return $cache
+    }
+
+    foreach ($item in (ConvertTo-Array ((Get-Content -Raw -Encoding UTF8 $fullPath) | ConvertFrom-Json))) {
+        if (-not $item.Name -or -not $item.Owner -or -not $item.Revision) {
+            continue
+        }
+        $key = Get-RepositoryKey -Owner ([string]$item.Owner) -Name ([string]$item.Name)
+        $cache[$key] = $item
+    }
+    return $cache
+}
+
 $generatedAt = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss zzz")
 $resolved = @()
 $repositories = Read-SelectedRepositories -Path $SelectionPath
+$metadataFullPath = [System.IO.Path]::GetFullPath($MetadataPath)
+$cachedMetadata = Get-CachedMetadataByKey -Path $metadataFullPath
 
 foreach ($repo in $repositories) {
-    Write-Host ("Resolving {0}/{1}" -f $repo.Owner, $repo.Name)
-    $repository = Get-Repository -Name $repo.Name -Owner $repo.Owner
-    $latest = Get-LatestMetadata -RepositoryId $repository.id
-    $resolved += [pscustomobject]@{
-        Name = $repo.Name
-        Owner = $repo.Owner
-        Section = $repo.Section
-        RepositoryId = $repository.id
-        Revision = $latest.Revision
-        NumericRevision = $latest.NumericRevision
-        ToolVersions = Get-ToolVersions -Tools $latest.Tools
-        ToolShedUrl = $ToolShedUrl.TrimEnd("/")
-        RepositoryUpdated = $repository.update_time
-        Description = $repository.description
+    $key = Get-RepositoryKey -Owner $repo.Owner -Name $repo.Name
+    if (-not $ForceResolve -and $cachedMetadata.ContainsKey($key)) {
+        $cached = $cachedMetadata[$key]
+        Write-Host ("Using cached metadata, skipping resolve: {0}/{1}" -f $repo.Owner, $repo.Name)
+        $resolved += [pscustomobject]@{
+            Name = $repo.Name
+            Owner = $repo.Owner
+            Section = $repo.Section
+            RepositoryId = if ($cached.RepositoryId) { [string]$cached.RepositoryId } else { "" }
+            Revision = [string]$cached.Revision
+            NumericRevision = if ($cached.NumericRevision) { [int]$cached.NumericRevision } else { 0 }
+            ToolVersions = if ($cached.ToolVersions) { [string]$cached.ToolVersions } else { "" }
+            ToolShedUrl = if ($cached.ToolShedUrl) { [string]$cached.ToolShedUrl } else { $ToolShedUrl.TrimEnd("/") }
+            RepositoryUpdated = if ($cached.RepositoryUpdated) { [string]$cached.RepositoryUpdated } else { "" }
+            Description = if ($cached.Description) { [string]$cached.Description } else { "" }
+        }
+    } else {
+        Write-Host ("Resolving {0}/{1}" -f $repo.Owner, $repo.Name)
+        $repository = Get-Repository -Name $repo.Name -Owner $repo.Owner
+        $latest = Get-LatestMetadata -RepositoryId $repository.id
+        $resolved += [pscustomobject]@{
+            Name = $repo.Name
+            Owner = $repo.Owner
+            Section = $repo.Section
+            RepositoryId = $repository.id
+            Revision = $latest.Revision
+            NumericRevision = $latest.NumericRevision
+            ToolVersions = Get-ToolVersions -Tools $latest.Tools
+            ToolShedUrl = $ToolShedUrl.TrimEnd("/")
+            RepositoryUpdated = $repository.update_time
+            Description = $repository.description
+        }
     }
 }
 
@@ -158,16 +206,15 @@ foreach ($repo in $resolved) {
 }
 
 $outputFullPath = [System.IO.Path]::GetFullPath($OutputPath)
-$metadataFullPath = [System.IO.Path]::GetFullPath($MetadataPath)
 
 $outputDirectory = Split-Path -Parent $outputFullPath
 if ($outputDirectory -and -not (Test-Path $outputDirectory)) {
     New-Item -ItemType Directory -Path $outputDirectory | Out-Null
 }
 
-[System.IO.File]::WriteAllText($outputFullPath, $builder.ToString(), [System.Text.UTF8Encoding]::new($false))
+[System.IO.File]::WriteAllText($outputFullPath, (($builder.ToString() -replace "`r`n", "`n") -replace "`r", "`n"), [System.Text.UTF8Encoding]::new($false))
 $metadataJson = if ($resolved) { $resolved | ConvertTo-Json -Depth 8 } else { "[]" }
-[System.IO.File]::WriteAllText($metadataFullPath, $metadataJson + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+[System.IO.File]::WriteAllText($metadataFullPath, (($metadataJson -replace "`r`n", "`n") -replace "`r", "`n") + "`n", [System.Text.UTF8Encoding]::new($false))
 
 Write-Host "Wrote $outputFullPath"
 Write-Host "Wrote $metadataFullPath"

@@ -76,10 +76,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-Launcher.ps1
 如需刷新到当前 Tool Shed 最新可安装 revision：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Update-ToolList.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Update-ToolList.ps1 -ForceResolve
 ```
 
-刷新 revision 不会强制重装已安装工具。需要安装新勾选工具时，在启动器中点击 `Tools`，再点击 `Apply changes`。
+工具管理器默认会复用 `tool_list.metadata.json` 中没有变动过的工具 metadata，只 resolve 新增工具；手动加 `-ForceResolve` 才会刷新所有已选工具的最新 revision。刷新 revision 不会强制重装已安装工具。需要安装新勾选工具时，在启动器中点击 `Tools`，再点击 `Apply changes`。
 
 ## 清理任务和文件
 

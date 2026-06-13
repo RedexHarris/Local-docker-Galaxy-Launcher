@@ -11,6 +11,92 @@ $ExampleEnvFile = Join-Path $ProjectRoot ".env.example"
 $ToolListFile = Join-Path $ProjectRoot "tool_list.yml"
 $RemovedToolsFile = Join-Path $ProjectRoot "tools.removed.json"
 $LogFile = Join-Path $ProjectRoot "launcher.log"
+$LauncherWindowTitle = "Local Galaxy Launcher"
+
+function Get-SingleInstanceName {
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($ProjectRoot.ToLowerInvariant())
+        $hash = [System.BitConverter]::ToString($sha256.ComputeHash($bytes)).Replace("-", "").Substring(0, 16)
+        return "Local\LocalGalaxyLauncher-$hash"
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
+function Show-ExistingLauncherWindow {
+    param([string]$Title)
+
+    try {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class LocalGalaxyLauncherWindowApi
+{
+    public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+    public static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
+    public const UInt32 SWP_NOSIZE = 0x0001;
+    public const UInt32 SWP_NOMOVE = 0x0002;
+    public const UInt32 SWP_SHOWWINDOW = 0x0040;
+
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, UInt32 uFlags);
+}
+"@ -ErrorAction SilentlyContinue
+
+        $handle = [IntPtr]::Zero
+        for ($i = 0; $i -lt 50; $i++) {
+            $handle = [LocalGalaxyLauncherWindowApi]::FindWindow($null, $Title)
+            if ($handle -ne [IntPtr]::Zero) {
+                break
+            }
+            Start-Sleep -Milliseconds 100
+        }
+
+        if ($handle -eq [IntPtr]::Zero) {
+            return
+        }
+
+        [void][LocalGalaxyLauncherWindowApi]::ShowWindowAsync($handle, 9)
+        [void][LocalGalaxyLauncherWindowApi]::SetForegroundWindow($handle)
+        [void][LocalGalaxyLauncherWindowApi]::SetWindowPos(
+            $handle,
+            [LocalGalaxyLauncherWindowApi]::HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            [LocalGalaxyLauncherWindowApi]::SWP_NOMOVE -bor [LocalGalaxyLauncherWindowApi]::SWP_NOSIZE -bor [LocalGalaxyLauncherWindowApi]::SWP_SHOWWINDOW
+        )
+        [void][LocalGalaxyLauncherWindowApi]::SetWindowPos(
+            $handle,
+            [LocalGalaxyLauncherWindowApi]::HWND_NOTOPMOST,
+            0,
+            0,
+            0,
+            0,
+            [LocalGalaxyLauncherWindowApi]::SWP_NOMOVE -bor [LocalGalaxyLauncherWindowApi]::SWP_NOSIZE -bor [LocalGalaxyLauncherWindowApi]::SWP_SHOWWINDOW
+        )
+    } catch {
+    }
+}
+
+$createdLauncherInstance = $false
+$script:SingleInstanceMutex = [System.Threading.Mutex]::new($true, (Get-SingleInstanceName), [ref]$createdLauncherInstance)
+if (-not $createdLauncherInstance) {
+    Show-ExistingLauncherWindow -Title $LauncherWindowTitle
+    return
+}
 
 function Initialize-EnvFile {
     if (-not (Test-Path $EnvFile) -and (Test-Path $ExampleEnvFile)) {
@@ -50,6 +136,7 @@ $script:StatusLabel = $null
 $script:ContainerStatusLabel = $null
 $script:ProgressBar = $null
 $script:Form = $null
+$script:ToolManagerProcess = $null
 
 function Add-Log {
     param([string]$Message)
@@ -505,11 +592,7 @@ function Start-Galaxy {
         Wait-GalaxyReady
         Sync-SelectedToolsIfNeeded
         Open-Galaxy
-        Set-Status "Galaxy opened. This launcher will close automatically."
-        if (-not $NoAutoClose -and $script:Form) {
-            Start-Sleep -Seconds 2
-            $script:Form.Close()
-        }
+        Set-Status "Galaxy opened. Launcher will remain open."
     } catch {
         Set-Status "Error: $($_.Exception.Message)"
         [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Local Galaxy Launcher", "OK", "Error") | Out-Null
@@ -692,7 +775,7 @@ function Start-HiddenPowerShellScript {
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
     $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-    [System.Diagnostics.Process]::Start($startInfo) | Out-Null
+    return [System.Diagnostics.Process]::Start($startInfo)
 }
 
 function Get-CombinedLogText {
@@ -753,7 +836,31 @@ function Open-LogsWindow {
 
 function Open-ToolManager {
     $scriptPath = Join-Path $PSScriptRoot "Manage-Tools.ps1"
-    Start-HiddenPowerShellScript -ScriptPath $scriptPath
+    if ($script:ToolManagerProcess -and -not $script:ToolManagerProcess.HasExited) {
+        Set-Status "Tool manager is already open."
+        return
+    }
+
+    $script:ToolManagerProcess = Start-HiddenPowerShellScript -ScriptPath $scriptPath -Arguments @("-ParentProcessId", [string]$PID)
+    Set-Status "Tool manager opened."
+}
+
+function Close-ToolManagerProcess {
+    if (-not $script:ToolManagerProcess -or $script:ToolManagerProcess.HasExited) {
+        return
+    }
+
+    try {
+        [void]$script:ToolManagerProcess.CloseMainWindow()
+        if (-not $script:ToolManagerProcess.WaitForExit(2500)) {
+            $script:ToolManagerProcess.Kill()
+        }
+    } catch {
+        try {
+            $script:ToolManagerProcess.Kill()
+        } catch {
+        }
+    }
 }
 
 try {
@@ -769,7 +876,7 @@ try {
 
 $form = [System.Windows.Forms.Form]::new()
 $script:Form = $form
-$form.Text = "Local Galaxy Launcher"
+$form.Text = $LauncherWindowTitle
 $form.StartPosition = "CenterScreen"
 $form.ClientSize = [System.Drawing.Size]::new(760, 520)
 $form.FormBorderStyle = "FixedSingle"
@@ -886,6 +993,21 @@ $containerTimer = [System.Windows.Forms.Timer]::new()
 $containerTimer.Interval = 5000
 $containerTimer.Add_Tick({ Update-ContainerStatus })
 $containerTimer.Start()
+
+$form.Add_FormClosing({
+    Close-ToolManagerProcess
+})
+
+$form.Add_FormClosed({
+    if ($script:SingleInstanceMutex) {
+        try {
+            $script:SingleInstanceMutex.ReleaseMutex()
+        } catch {
+        }
+        $script:SingleInstanceMutex.Dispose()
+        $script:SingleInstanceMutex = $null
+    }
+})
 
 $form.Add_Shown({
     try {

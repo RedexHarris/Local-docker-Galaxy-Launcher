@@ -73,7 +73,29 @@ function Write-JsonArray {
     if (-not $json) {
         $json = "[]"
     }
-    [System.IO.File]::WriteAllText($Path, $json + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText($Path, (($json -replace "`r`n", "`n") -replace "`r", "`n") + "`n", [System.Text.UTF8Encoding]::new($false))
+}
+
+$script:ProgressCurrent = 0
+$script:ProgressTotal = 0
+
+function Set-SyncProgressTotal {
+    param([int]$Total)
+
+    $script:ProgressCurrent = 0
+    $script:ProgressTotal = [math]::Max(0, $Total)
+}
+
+function Write-SyncProgress {
+    param(
+        [string]$Message,
+        [switch]$Advance
+    )
+
+    if ($Advance -and $script:ProgressCurrent -lt $script:ProgressTotal) {
+        $script:ProgressCurrent++
+    }
+    Write-Host ("Progress {0}/{1}: {2}" -f $script:ProgressCurrent, $script:ProgressTotal, $Message)
 }
 
 function Get-InstalledRepositories {
@@ -155,6 +177,28 @@ function Get-ToolMap {
         $map[(Get-ToolKey -Owner ([string]$tool.owner) -Name ([string]$tool.name))] = $true
     }
     return $map
+}
+
+function Get-PendingInstallTools {
+    param(
+        [object[]]$SelectedTools,
+        [hashtable]$ActiveInstalledMap
+    )
+
+    $pending = @()
+    foreach ($tool in (ConvertTo-Array $SelectedTools)) {
+        $name = [string]$tool.name
+        $owner = [string]$tool.owner
+        if (-not $name -or -not $owner) {
+            continue
+        }
+
+        $toolKey = Get-ToolKey -Owner $owner -Name $name
+        if (-not $ActiveInstalledMap.ContainsKey($toolKey)) {
+            $pending += $tool
+        }
+    }
+    return $pending
 }
 
 function Add-ReconcileRemovals {
@@ -363,6 +407,7 @@ function Invoke-RemoveRepositories {
             continue
         }
 
+        Write-SyncProgress -Message "Removing $owner/$name" -Advance
         $toolKey = Get-ToolKey -Owner $owner -Name $name
         $matches = $Installed | Where-Object {
             (Get-ToolKey -Owner ([string]$_.owner) -Name ([string]$_.name)) -eq $toolKey -and
@@ -397,6 +442,8 @@ function Invoke-RemoveRepositories {
     if ($hadFailures) {
         throw "Some tools could not be removed. Pending removals were kept in $RemovedPath"
     }
+
+    return $Installed
 }
 
 $selectedTools = @(Read-JsonArray -Path $SelectionPath)
@@ -405,13 +452,20 @@ $metadataByKey = Get-MetadataByKey
 
 $installed = Get-InstalledRepositories
 $removedTools = @(Add-ReconcileRemovals -SelectedTools $selectedTools -RemovedTools $removedTools -Installed $installed)
-Invoke-RemoveRepositories -RemovedTools $removedTools -Installed $installed
+$activeInstalledMap = Get-ActiveInstalledMap -Installed $installed
+$pendingInstallTools = @(Get-PendingInstallTools -SelectedTools $selectedTools -ActiveInstalledMap $activeInstalledMap)
+Set-SyncProgressTotal -Total ((ConvertTo-Array $removedTools).Count + (ConvertTo-Array $pendingInstallTools).Count)
+if ($script:ProgressTotal -eq 0) {
+    Write-SyncProgress -Message "No tool install/remove changes."
+}
+
+$installed = Invoke-RemoveRepositories -RemovedTools $removedTools -Installed $installed
 
 $installed = Get-InstalledRepositories
 $activeInstalledMap = Get-ActiveInstalledMap -Installed $installed
+$pendingInstallTools = @(Get-PendingInstallTools -SelectedTools $selectedTools -ActiveInstalledMap $activeInstalledMap)
 
 $installedCount = 0
-$skippedCount = 0
 foreach ($tool in (ConvertTo-Array $selectedTools)) {
     $name = [string]$tool.name
     $owner = [string]$tool.owner
@@ -422,15 +476,24 @@ foreach ($tool in (ConvertTo-Array $selectedTools)) {
     $toolKey = Get-ToolKey -Owner $owner -Name $name
     if ($activeInstalledMap.ContainsKey($toolKey)) {
         Write-Host "Already installed, skipping: $owner/$name"
-        $skippedCount++
+    }
+}
+
+foreach ($tool in (ConvertTo-Array $pendingInstallTools)) {
+    $name = [string]$tool.name
+    $owner = [string]$tool.owner
+    if (-not $name -or -not $owner) {
         continue
     }
 
+    $toolKey = Get-ToolKey -Owner $owner -Name $name
     $metadata = if ($metadataByKey.ContainsKey($toolKey)) { $metadataByKey[$toolKey] } else { $null }
+    Write-SyncProgress -Message "Installing $owner/$name" -Advance
     Invoke-InstallRepository -Tool $tool -Metadata $metadata
     $installed = Wait-RepositoryInstalled -Tool $tool
     $activeInstalledMap = Get-ActiveInstalledMap -Installed $installed
     $installedCount++
 }
 
+$skippedCount = (ConvertTo-Array $selectedTools).Count - (ConvertTo-Array $pendingInstallTools).Count
 Write-Host "Tool sync complete. Installed missing: $installedCount. Already present: $skippedCount."
