@@ -778,9 +778,17 @@ function Start-HiddenPowerShellScript {
     return [System.Diagnostics.Process]::Start($startInfo)
 }
 
+function Get-LocalLogPaths {
+    return @(
+        $LogFile,
+        (Join-Path $ProjectRoot "tool-manager.log"),
+        (Join-Path $ProjectRoot "compact-docker-disk.log")
+    )
+}
+
 function Get-CombinedLogText {
     $builder = [System.Text.StringBuilder]::new()
-    foreach ($path in @($LogFile, (Join-Path $ProjectRoot "tool-manager.log"))) {
+    foreach ($path in (Get-LocalLogPaths)) {
         [void]$builder.AppendLine("==== $([System.IO.Path]::GetFileName($path)) ====")
         if (Test-Path $path) {
             [void]$builder.AppendLine((Get-Content -Raw -Encoding UTF8 $path))
@@ -790,6 +798,64 @@ function Get-CombinedLogText {
         [void]$builder.AppendLine()
     }
     return $builder.ToString()
+}
+
+function Clear-LocalLogFiles {
+    $cleared = 0
+    $errors = @()
+    foreach ($path in (Get-LocalLogPaths)) {
+        try {
+            if (Test-Path $path) {
+                [System.IO.File]::WriteAllText($path, "", [System.Text.UTF8Encoding]::new($false))
+                $cleared++
+            }
+        } catch {
+            $errors += [pscustomobject]@{
+                Path = $path
+                Message = $_.Exception.Message
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        Cleared = $cleared
+        Errors = $errors
+    }
+}
+
+function Clear-LocalLogs {
+    $message = "This will clear local launcher logs in the project folder. Galaxy data, installed tools, Docker images, containers, and volumes will not be changed. Continue?"
+    $result = [System.Windows.Forms.MessageBox]::Show(
+        $message,
+        "Clear Local Logs",
+        [System.Windows.Forms.MessageBoxButtons]::YesNo,
+        [System.Windows.Forms.MessageBoxIcon]::Question
+    )
+    if ($result -ne [System.Windows.Forms.DialogResult]::Yes) {
+        if ($script:StatusLabel) {
+            $script:StatusLabel.Text = "Log cleanup cancelled."
+        }
+        return
+    }
+
+    $result = Clear-LocalLogFiles
+    foreach ($errorItem in @($result.Errors)) {
+        if ($errorItem.Path) {
+            [System.Windows.Forms.MessageBox]::Show(
+                "Could not clear $([System.IO.Path]::GetFileName([string]$errorItem.Path)): $($errorItem.Message)",
+                "Clear Local Logs",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Error
+            ) | Out-Null
+        }
+    }
+
+    if ($script:LogBox) {
+        $script:LogBox.Clear()
+    }
+    if ($script:StatusLabel) {
+        $script:StatusLabel.Text = "Cleared $($result.Cleared) local log file(s)."
+    }
 }
 
 function Open-LogsWindow {
@@ -820,6 +886,18 @@ function Open-LogsWindow {
         $logViewerBox.ScrollToCaret()
     })
     $viewer.Controls.Add($refreshLogButton)
+
+    $clearLogButton = [System.Windows.Forms.Button]::new()
+    $clearLogButton.Text = "Clear logs"
+    $clearLogButton.Location = [System.Drawing.Point]::new(424, 410)
+    $clearLogButton.Size = [System.Drawing.Size]::new(120, 30)
+    $clearLogButton.Add_Click({
+        Clear-LocalLogs
+        $logViewerBox.Text = Get-CombinedLogText
+        $logViewerBox.SelectionStart = $logViewerBox.TextLength
+        $logViewerBox.ScrollToCaret()
+    })
+    $viewer.Controls.Add($clearLogButton)
 
     $closeLogButton = [System.Windows.Forms.Button]::new()
     $closeLogButton.Text = "Close"
@@ -970,6 +1048,13 @@ $logsButton.Location = [System.Drawing.Point]::new(126, 210)
 $logsButton.Size = [System.Drawing.Size]::new(90, 34)
 $logsButton.Add_Click({ Open-LogsWindow })
 $form.Controls.Add($logsButton)
+
+$clearLogsButton = [System.Windows.Forms.Button]::new()
+$clearLogsButton.Text = "Clear logs"
+$clearLogsButton.Location = [System.Drawing.Point]::new(228, 210)
+$clearLogsButton.Size = [System.Drawing.Size]::new(120, 34)
+$clearLogsButton.Add_Click({ Clear-LocalLogs })
+$form.Controls.Add($clearLogsButton)
 
 $logBox = [System.Windows.Forms.TextBox]::new()
 $script:LogBox = $logBox

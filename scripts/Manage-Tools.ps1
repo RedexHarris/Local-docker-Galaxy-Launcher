@@ -233,6 +233,31 @@ function Load-SelectedTools {
     Add-Log ("Loaded {0} selected tools." -f (ConvertTo-Array $tools).Count)
 }
 
+function Refresh-GridSelectionFromSavedSelection {
+    $selectedByKey = @{}
+    foreach ($tool in (ConvertTo-Array (Read-SelectedTools))) {
+        if (-not $tool.name -or -not $tool.owner) {
+            continue
+        }
+        $selectedByKey[(Get-Key -Owner ([string]$tool.owner) -Name ([string]$tool.name))] = $true
+    }
+
+    foreach ($row in $script:Grid.Rows) {
+        if ($row.IsNewRow) {
+            continue
+        }
+        $name = [string]$row.Cells["Name"].Value
+        $owner = [string]$row.Cells["Owner"].Value
+        if (-not $name -or -not $owner) {
+            continue
+        }
+        $key = Get-Key -Owner $owner -Name $name
+        $row.Cells["Selected"].Value = $selectedByKey.ContainsKey($key)
+    }
+
+    Add-Log ("Synced visible checkboxes with {0} saved selected tools." -f $selectedByKey.Count)
+}
+
 function Search-OfficialTools {
     param([string]$Query)
 
@@ -592,8 +617,17 @@ function Apply-ToolChanges {
             $RemovedPath,
             "-ReconcileInstalledWithSelection"
         )
+        Refresh-GridSelectionFromSavedSelection
         Set-ApplyProgress -Percent 100 -Message "Tool changes were applied. Refresh the Galaxy browser tab if it was already open."
         Add-Log "Tool changes were applied. Refresh the Galaxy browser tab if it was already open."
+    } catch {
+        try {
+            Refresh-GridSelectionFromSavedSelection
+        } catch {
+            Add-Log "Could not refresh visible checkboxes after failed apply: $($_.Exception.Message)"
+        }
+        Set-ApplyProgress -Percent 0 -Message "Tool changes were not fully applied. Failed installs were unchecked if Galaxy did not complete them."
+        throw
     } finally {
         if ($script:ApplyButton) {
             $script:ApplyButton.Enabled = $true

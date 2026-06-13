@@ -4,6 +4,7 @@ param(
     [string]$ApiKey = "local-usegalaxy-admin-key",
     [string]$SelectionPath,
     [string]$MetadataPath,
+    [string]$ToolListPath,
     [string]$RemovedPath,
     [string]$ToolShedUrl = "https://toolshed.g2.bx.psu.edu",
     [switch]$KeepPendingOnMissing,
@@ -18,12 +19,16 @@ if (-not $SelectionPath) {
 if (-not $MetadataPath) {
     $MetadataPath = Join-Path $PSScriptRoot "..\tool_list.metadata.json"
 }
+if (-not $ToolListPath) {
+    $ToolListPath = Join-Path $PSScriptRoot "..\tool_list.yml"
+}
 if (-not $RemovedPath) {
     $RemovedPath = Join-Path $PSScriptRoot "..\tools.removed.json"
 }
 
 $SelectionPath = [System.IO.Path]::GetFullPath($SelectionPath)
 $MetadataPath = [System.IO.Path]::GetFullPath($MetadataPath)
+$ToolListPath = [System.IO.Path]::GetFullPath($ToolListPath)
 $RemovedPath = [System.IO.Path]::GetFullPath($RemovedPath)
 $GalaxyUrl = $GalaxyUrl.TrimEnd("/")
 $ToolShedUrl = $ToolShedUrl.TrimEnd("/")
@@ -58,12 +63,15 @@ function Read-JsonArray {
 function Write-JsonArray {
     param(
         [string]$Path,
-        [object[]]$Items
+        [object[]]$Items,
+        [switch]$KeepEmptyFile
     )
 
     $itemsArray = ConvertTo-Array $Items
     if (-not $itemsArray) {
-        if (Test-Path $Path) {
+        if ($KeepEmptyFile) {
+            [System.IO.File]::WriteAllText($Path, "[]`n", [System.Text.UTF8Encoding]::new($false))
+        } elseif (Test-Path $Path) {
             Remove-Item -LiteralPath $Path -Force
         }
         return
@@ -143,7 +151,11 @@ function Test-RepositoryInstalled {
         return ([string]$Repository.status) -match "(?i)^installed$|^ok$"
     }
 
-    return $true
+    if ($Repository.PSObject.Properties.Name -contains "installation_status" -and $Repository.installation_status) {
+        return ([string]$Repository.installation_status) -match "(?i)^installed$|^ok$"
+    }
+
+    return $false
 }
 
 function Get-ActiveInstalledMap {
@@ -177,6 +189,52 @@ function Get-ToolMap {
         $map[(Get-ToolKey -Owner ([string]$tool.owner) -Name ([string]$tool.name))] = $true
     }
     return $map
+}
+
+function Remove-ToolsFromSelection {
+    param(
+        [object[]]$SelectedTools,
+        [object[]]$ToolsToRemove
+    )
+
+    $removeMap = Get-ToolMap -Tools $ToolsToRemove
+    if ($removeMap.Count -eq 0) {
+        return @(ConvertTo-Array $SelectedTools)
+    }
+
+    $remaining = @()
+    $removedLabels = @()
+    foreach ($tool in (ConvertTo-Array $SelectedTools)) {
+        if (-not $tool.name -or -not $tool.owner) {
+            continue
+        }
+
+        $name = [string]$tool.name
+        $owner = [string]$tool.owner
+        $key = Get-ToolKey -Owner $owner -Name $name
+        if ($removeMap.ContainsKey($key)) {
+            $removedLabels += "$owner/$name"
+            continue
+        }
+
+        $remaining += $tool
+    }
+
+    Write-JsonArray -Path $SelectionPath -Items $remaining -KeepEmptyFile
+    Write-Host ("Unchecked failed install(s) in tools.selected.json: {0}" -f (($removedLabels | Sort-Object -Unique) -join ", "))
+    return @(ConvertTo-Array $remaining)
+}
+
+function Update-ToolListFromSelection {
+    $updateScript = Join-Path $PSScriptRoot "Update-ToolList.ps1"
+    if (-not (Test-Path $updateScript)) {
+        Write-Warning "Could not regenerate tool_list.yml because Update-ToolList.ps1 was not found."
+        return
+    }
+
+    Write-Host "Regenerating tool_list.yml after failed installs were unchecked..."
+    & $updateScript -SelectionPath $SelectionPath -MetadataPath $MetadataPath -OutputPath $ToolListPath
+    Write-Host "tool_list.yml regenerated after failed installs were unchecked."
 }
 
 function Get-PendingInstallTools {
@@ -390,6 +448,69 @@ function Invoke-InstallRepository {
     throw "Could not install ${owner}/${name}: $($lastError.Exception.Message)"
 }
 
+function Invoke-CleanupFailedInstallRepository {
+    param(
+        [object]$Tool,
+        [object[]]$Installed
+    )
+
+    $name = [string]$Tool.name
+    $owner = [string]$Tool.owner
+    if (-not $name -or -not $owner) {
+        return $Installed
+    }
+
+    $toolKey = Get-ToolKey -Owner $owner -Name $name
+    $matches = ConvertTo-Array $Installed | Where-Object {
+        $_.name -and $_.owner -and
+        (Get-ToolKey -Owner ([string]$_.owner) -Name ([string]$_.name)) -eq $toolKey
+    }
+
+    if (-not $matches) {
+        Write-Host "No incomplete Tool Shed repository record found for cleanup: $owner/$name"
+        return $Installed
+    }
+
+    $apiKey = [uri]::EscapeDataString($ApiKey)
+    $cleaned = 0
+    foreach ($repository in (ConvertTo-Array $matches)) {
+        if (Test-RepositoryInstalled -Repository $repository) {
+            Write-Host "Skipping cleanup because Galaxy reports the repository as installed: $owner/$name"
+            continue
+        }
+
+        if ($repository.uninstalled -or $repository.deleted) {
+            Write-Host "Incomplete repository already marked removed: $owner/$name"
+            continue
+        }
+
+        if (-not $repository.id) {
+            Write-Warning "Could not clean up incomplete repository without an id: $owner/$name"
+            continue
+        }
+
+        try {
+            $id = [uri]::EscapeDataString([string]$repository.id)
+            $deleteUri = "{0}/api/tool_shed_repositories/{1}?key={2}&remove_from_disk=true" -f $GalaxyUrl, $id, $apiKey
+            Write-Host "Cleaning up incomplete Tool Shed repository and files: $owner/$name"
+            Invoke-RestMethod -Uri $deleteUri -Method Delete -UseBasicParsing -TimeoutSec 120 | Out-Null
+            $cleaned++
+        } catch {
+            Write-Warning "Could not clean up incomplete repository ${owner}/${name}: $($_.Exception.Message)"
+        }
+    }
+
+    if ($cleaned -gt 0) {
+        try {
+            return Get-InstalledRepositories -Quiet
+        } catch {
+            Write-Warning "Could not reload installed repositories after cleanup: $($_.Exception.Message)"
+        }
+    }
+
+    return $Installed
+}
+
 function Invoke-RemoveRepositories {
     param(
         [object[]]$RemovedTools,
@@ -466,6 +587,8 @@ $activeInstalledMap = Get-ActiveInstalledMap -Installed $installed
 $pendingInstallTools = @(Get-PendingInstallTools -SelectedTools $selectedTools -ActiveInstalledMap $activeInstalledMap)
 
 $installedCount = 0
+$failedInstallTools = @()
+$failedInstallMessages = @()
 foreach ($tool in (ConvertTo-Array $selectedTools)) {
     $name = [string]$tool.name
     $owner = [string]$tool.owner
@@ -489,11 +612,58 @@ foreach ($tool in (ConvertTo-Array $pendingInstallTools)) {
     $toolKey = Get-ToolKey -Owner $owner -Name $name
     $metadata = if ($metadataByKey.ContainsKey($toolKey)) { $metadataByKey[$toolKey] } else { $null }
     Write-SyncProgress -Message "Installing $owner/$name" -Advance
-    Invoke-InstallRepository -Tool $tool -Metadata $metadata
-    $installed = Wait-RepositoryInstalled -Tool $tool
-    $activeInstalledMap = Get-ActiveInstalledMap -Installed $installed
-    $installedCount++
+    try {
+        $installRequestError = $null
+        try {
+            Invoke-InstallRepository -Tool $tool -Metadata $metadata
+        } catch {
+            if ($_.Exception.Message -match "No changeset revision") {
+                throw
+            }
+            $installRequestError = $_.Exception.Message
+            Write-Warning "Install request returned an error for ${owner}/${name}. Checking Galaxy status before marking it failed: $installRequestError"
+        }
+
+        try {
+            $installed = Wait-RepositoryInstalled -Tool $tool
+        } catch {
+            if ($installRequestError) {
+                throw "Install request error: $installRequestError. Galaxy did not report a completed install afterwards: $($_.Exception.Message)"
+            }
+            throw
+        }
+
+        $activeInstalledMap = Get-ActiveInstalledMap -Installed $installed
+        if (-not $activeInstalledMap.ContainsKey($toolKey)) {
+            throw "Galaxy did not report an active installed repository after install completed."
+        }
+        $installedCount++
+    } catch {
+        $failedInstallTools += $tool
+        $failedInstallMessages += ("{0}/{1}: {2}" -f $owner, $name, $_.Exception.Message)
+        Write-Warning "Could not install ${owner}/${name}: $($_.Exception.Message)"
+        try {
+            $installed = Get-InstalledRepositories -Quiet
+            $installed = Invoke-CleanupFailedInstallRepository -Tool $tool -Installed $installed
+            $activeInstalledMap = Get-ActiveInstalledMap -Installed $installed
+        } catch {
+            Write-Warning "Could not reload installed repositories after failed install: $($_.Exception.Message)"
+        }
+    }
 }
 
 $skippedCount = (ConvertTo-Array $selectedTools).Count - (ConvertTo-Array $pendingInstallTools).Count
+if ($failedInstallTools) {
+    $selectedTools = @(Remove-ToolsFromSelection -SelectedTools $selectedTools -ToolsToRemove $failedInstallTools)
+    try {
+        Update-ToolListFromSelection
+    } catch {
+        Write-Warning "Could not regenerate tool_list.yml after failed installs were unchecked: $($_.Exception.Message)"
+    }
+
+    $failedNames = (ConvertTo-Array $failedInstallTools | ForEach-Object { "$($_.owner)/$($_.name)" }) -join ", "
+    Write-Host "Tool sync incomplete. Installed missing: $installedCount. Already present: $skippedCount. Failed and unchecked: $failedNames."
+    throw ("Some tools could not be installed and were unchecked: {0}" -f (($failedInstallMessages | Sort-Object -Unique) -join "; "))
+}
+
 Write-Host "Tool sync complete. Installed missing: $installedCount. Already present: $skippedCount."
