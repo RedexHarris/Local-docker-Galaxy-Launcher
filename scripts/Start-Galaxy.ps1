@@ -858,6 +858,221 @@ function Clear-LocalLogs {
     }
 }
 
+function Format-ByteSize {
+    param([long]$Bytes)
+
+    $units = @("B", "KB", "MB", "GB", "TB")
+    $value = [double]$Bytes
+    $unitIndex = 0
+    while ($value -ge 1024 -and $unitIndex -lt ($units.Count - 1)) {
+        $value = $value / 1024
+        $unitIndex++
+    }
+
+    if ($unitIndex -eq 0) {
+        return ("{0} {1}" -f [int64]$value, $units[$unitIndex])
+    }
+    return ("{0:N2} {1}" -f $value, $units[$unitIndex])
+}
+
+function Get-DockerDesktopSettingsPath {
+    $paths = @(
+        (Join-Path $env:APPDATA "Docker\settings-store.json"),
+        (Join-Path $env:APPDATA "Docker\settings.json")
+    )
+
+    foreach ($path in $paths) {
+        if (Test-Path $path) {
+            return $path
+        }
+    }
+    return $paths[0]
+}
+
+function Get-DockerDesktopVhdxFiles {
+    $roots = @(
+        (Join-Path $env:LOCALAPPDATA "Docker\wsl"),
+        (Join-Path $env:LOCALAPPDATA "DockerDesktop"),
+        (Join-Path $env:PROGRAMDATA "DockerDesktop")
+    ) | Sort-Object -Unique
+
+    $items = @()
+    foreach ($root in $roots) {
+        if (-not (Test-Path $root)) {
+            continue
+        }
+        $items += @(Get-ChildItem -Path $root -Recurse -Filter "*.vhdx" -File -ErrorAction SilentlyContinue)
+    }
+
+    return @($items | Sort-Object FullName -Unique)
+}
+
+function Get-DockerStorageSummary {
+    $builder = [System.Text.StringBuilder]::new()
+    [void]$builder.AppendLine("Docker Desktop stores images, containers, and volumes inside its Linux disk image.")
+    [void]$builder.AppendLine("This is a global Docker Desktop location, not a per-project build folder.")
+    [void]$builder.AppendLine()
+    [void]$builder.AppendLine("Use Docker Desktop Settings > Resources > Advanced > Disk image location to move existing Docker data safely.")
+    [void]$builder.AppendLine()
+
+    $settingsPath = Get-DockerDesktopSettingsPath
+    [void]$builder.AppendLine("Docker Desktop settings file:")
+    if (Test-Path $settingsPath) {
+        [void]$builder.AppendLine("  $settingsPath")
+    } else {
+        [void]$builder.AppendLine("  Not found yet: $settingsPath")
+    }
+    [void]$builder.AppendLine()
+
+    $vhdxFiles = @(Get-DockerDesktopVhdxFiles)
+    if ($vhdxFiles) {
+        [void]$builder.AppendLine("Detected Docker Desktop disk image files:")
+        foreach ($file in $vhdxFiles) {
+            [void]$builder.AppendLine(("  {0}  ({1})" -f $file.FullName, (Format-ByteSize -Bytes $file.Length)))
+        }
+    } else {
+        [void]$builder.AppendLine("No Docker Desktop VHDX files were found in the common local locations.")
+    }
+
+    return $builder.ToString()
+}
+
+function Open-DockerDesktopApp {
+    $candidates = @()
+    foreach ($root in @(
+        $env:ProgramFiles,
+        [Environment]::GetEnvironmentVariable("ProgramFiles(x86)"),
+        $env:LOCALAPPDATA
+    )) {
+        if ($root) {
+            $candidates += (Join-Path $root "Docker\Docker\Docker Desktop.exe")
+            $candidates += (Join-Path $root "Docker Desktop.exe")
+        }
+    }
+
+    foreach ($path in $candidates) {
+        if ($path -and (Test-Path $path)) {
+            Start-Process -FilePath $path
+            return
+        }
+    }
+
+    Start-Process "Docker Desktop"
+}
+
+function Open-DockerStorageWindow {
+    $storageForm = [System.Windows.Forms.Form]::new()
+    $storageForm.Text = "Docker Storage"
+    $storageForm.StartPosition = "CenterParent"
+    $storageForm.ClientSize = [System.Drawing.Size]::new(780, 500)
+    $storageForm.FormBorderStyle = "FixedSingle"
+    $storageForm.MaximizeBox = $false
+
+    $summaryBox = [System.Windows.Forms.TextBox]::new()
+    $summaryBox.Location = [System.Drawing.Point]::new(16, 16)
+    $summaryBox.Size = [System.Drawing.Size]::new(748, 300)
+    $summaryBox.Multiline = $true
+    $summaryBox.ScrollBars = "Both"
+    $summaryBox.ReadOnly = $true
+    $summaryBox.WordWrap = $false
+    $summaryBox.Font = [System.Drawing.Font]::new("Consolas", 9)
+    $summaryBox.Text = Get-DockerStorageSummary
+    $storageForm.Controls.Add($summaryBox)
+
+    $targetLabel = [System.Windows.Forms.Label]::new()
+    $targetLabel.Text = "Target folder for Docker Desktop disk image location:"
+    $targetLabel.Location = [System.Drawing.Point]::new(18, 330)
+    $targetLabel.Size = [System.Drawing.Size]::new(500, 22)
+    $storageForm.Controls.Add($targetLabel)
+
+    $targetBox = [System.Windows.Forms.TextBox]::new()
+    $targetBox.Location = [System.Drawing.Point]::new(18, 356)
+    $targetBox.Size = [System.Drawing.Size]::new(590, 24)
+    $storageForm.Controls.Add($targetBox)
+
+    $browseButton = [System.Windows.Forms.Button]::new()
+    $browseButton.Text = "Browse"
+    $browseButton.Location = [System.Drawing.Point]::new(620, 354)
+    $browseButton.Size = [System.Drawing.Size]::new(100, 30)
+    $browseButton.Add_Click({
+        $dialog = [System.Windows.Forms.FolderBrowserDialog]::new()
+        $dialog.Description = "Choose a folder for Docker Desktop Disk image location"
+        $dialog.ShowNewFolderButton = $true
+        try {
+            if ($targetBox.Text -and (Test-Path $targetBox.Text)) {
+                $dialog.SelectedPath = $targetBox.Text
+            }
+            if ($dialog.ShowDialog($storageForm) -eq [System.Windows.Forms.DialogResult]::OK) {
+                $targetBox.Text = $dialog.SelectedPath
+                [System.Windows.Forms.Clipboard]::SetText($dialog.SelectedPath)
+            }
+        } finally {
+            $dialog.Dispose()
+        }
+    })
+    $storageForm.Controls.Add($browseButton)
+
+    $openDockerButton = [System.Windows.Forms.Button]::new()
+    $openDockerButton.Text = "Open Docker"
+    $openDockerButton.Location = [System.Drawing.Point]::new(18, 410)
+    $openDockerButton.Size = [System.Drawing.Size]::new(120, 32)
+    $openDockerButton.Add_Click({
+        try {
+            Open-DockerDesktopApp
+            [System.Windows.Forms.MessageBox]::Show(
+                "In Docker Desktop, open Settings > Resources > Advanced, set Disk image location to the selected folder, then click Apply & restart. Docker Desktop will move existing images, containers, and volumes.",
+                "Docker Storage",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Information
+            ) | Out-Null
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Docker Storage", "OK", "Error") | Out-Null
+        }
+    })
+    $storageForm.Controls.Add($openDockerButton)
+
+    $copyButton = [System.Windows.Forms.Button]::new()
+    $copyButton.Text = "Copy path"
+    $copyButton.Location = [System.Drawing.Point]::new(150, 410)
+    $copyButton.Size = [System.Drawing.Size]::new(100, 32)
+    $copyButton.Add_Click({
+        if ($targetBox.Text) {
+            [System.Windows.Forms.Clipboard]::SetText($targetBox.Text)
+        }
+    })
+    $storageForm.Controls.Add($copyButton)
+
+    $openTargetButton = [System.Windows.Forms.Button]::new()
+    $openTargetButton.Text = "Open folder"
+    $openTargetButton.Location = [System.Drawing.Point]::new(262, 410)
+    $openTargetButton.Size = [System.Drawing.Size]::new(110, 32)
+    $openTargetButton.Add_Click({
+        if ($targetBox.Text) {
+            if (-not (Test-Path $targetBox.Text)) {
+                New-Item -ItemType Directory -Path $targetBox.Text | Out-Null
+            }
+            Start-Process explorer.exe -ArgumentList @($targetBox.Text)
+        }
+    })
+    $storageForm.Controls.Add($openTargetButton)
+
+    $refreshStorageButton = [System.Windows.Forms.Button]::new()
+    $refreshStorageButton.Text = "Refresh"
+    $refreshStorageButton.Location = [System.Drawing.Point]::new(536, 410)
+    $refreshStorageButton.Size = [System.Drawing.Size]::new(90, 32)
+    $refreshStorageButton.Add_Click({ $summaryBox.Text = Get-DockerStorageSummary })
+    $storageForm.Controls.Add($refreshStorageButton)
+
+    $closeStorageButton = [System.Windows.Forms.Button]::new()
+    $closeStorageButton.Text = "Close"
+    $closeStorageButton.Location = [System.Drawing.Point]::new(638, 410)
+    $closeStorageButton.Size = [System.Drawing.Size]::new(90, 32)
+    $closeStorageButton.Add_Click({ $storageForm.Close() })
+    $storageForm.Controls.Add($closeStorageButton)
+
+    [void]$storageForm.ShowDialog($script:Form)
+}
+
 function Open-LogsWindow {
     $viewer = [System.Windows.Forms.Form]::new()
     $viewer.Text = "Local Galaxy Logs"
@@ -1055,6 +1270,13 @@ $clearLogsButton.Location = [System.Drawing.Point]::new(228, 210)
 $clearLogsButton.Size = [System.Drawing.Size]::new(120, 34)
 $clearLogsButton.Add_Click({ Clear-LocalLogs })
 $form.Controls.Add($clearLogsButton)
+
+$dockerStorageButton = [System.Windows.Forms.Button]::new()
+$dockerStorageButton.Text = "Docker storage"
+$dockerStorageButton.Location = [System.Drawing.Point]::new(360, 210)
+$dockerStorageButton.Size = [System.Drawing.Size]::new(140, 34)
+$dockerStorageButton.Add_Click({ Open-DockerStorageWindow })
+$form.Controls.Add($dockerStorageButton)
 
 $logBox = [System.Windows.Forms.TextBox]::new()
 $script:LogBox = $logBox

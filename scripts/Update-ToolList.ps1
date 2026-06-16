@@ -91,7 +91,8 @@ function Read-SelectedRepositories {
 
     $fullPath = [System.IO.Path]::GetFullPath($Path)
     if (-not (Test-Path $fullPath)) {
-        throw "Tool selection file not found: $fullPath"
+        Write-Host "Tool selection file not found. Starting with an empty selection: $fullPath"
+        return @()
     }
 
     $items = ConvertTo-Array ((Get-Content -Raw -Encoding UTF8 $fullPath) | ConvertFrom-Json)
@@ -194,15 +195,19 @@ $builder = [System.Text.StringBuilder]::new()
 [void]$builder.AppendLine("install_resolver_dependencies: true")
 [void]$builder.AppendLine("install_tool_dependencies: false")
 [void]$builder.AppendLine("install_repository_dependencies: true")
-[void]$builder.AppendLine("tools:")
 
-foreach ($repo in $resolved) {
-    [void]$builder.AppendLine("  - name: $($repo.Name)")
-    [void]$builder.AppendLine("    owner: $($repo.Owner)")
-    [void]$builder.AppendLine("    tool_shed_url: $($repo.ToolShedUrl)")
-    [void]$builder.AppendLine("    revisions:")
-    [void]$builder.AppendLine("      - '$($repo.Revision)'")
-    [void]$builder.AppendLine("    tool_panel_section_label: '$($repo.Section)'")
+if ($resolved) {
+    [void]$builder.AppendLine("tools:")
+    foreach ($repo in $resolved) {
+        [void]$builder.AppendLine("  - name: $($repo.Name)")
+        [void]$builder.AppendLine("    owner: $($repo.Owner)")
+        [void]$builder.AppendLine("    tool_shed_url: $($repo.ToolShedUrl)")
+        [void]$builder.AppendLine("    revisions:")
+        [void]$builder.AppendLine("      - '$($repo.Revision)'")
+        [void]$builder.AppendLine("    tool_panel_section_label: '$($repo.Section)'")
+    }
+} else {
+    [void]$builder.AppendLine("tools: []")
 }
 
 $outputFullPath = [System.IO.Path]::GetFullPath($OutputPath)

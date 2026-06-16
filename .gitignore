@@ -1,4 +1,6 @@
 .env
 *.log
+tool_list.yml
+tools.selected.json
 tool_list.metadata.json
 tools.removed.json

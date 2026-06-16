@@ -27,11 +27,6 @@ if ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 
-if [[ ! -f tool_list.yml ]]; then
-  echo "tool_list.yml is missing. Run scripts/Update-ToolList.ps1 or restore the file."
-  exit 1
-fi
-
 PORT="${GALAXY_PORT:-8080}"
 IMAGE="${GALAXY_IMAGE:-local-usegalaxy:latest}"
 if [[ -f .env ]]; then

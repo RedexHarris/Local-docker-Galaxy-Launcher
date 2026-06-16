@@ -9,9 +9,13 @@ ENV GALAXY_CONFIG_ADMIN_USERS=admin@example.org \
     GALAXY_DEFAULT_ADMIN_KEY=fakekey \
     GALAXY_CONFIG_BRAND="Local Galaxy Bioinformatics"
 
-COPY tool_list.yml /tmp/tool_list.yml
-
-RUN install-tools /tmp/tool_list.yml && \
+RUN printf '%s\n' \
+    'install_resolver_dependencies: true' \
+    'install_tool_dependencies: false' \
+    'install_repository_dependencies: true' \
+    'tools: []' \
+    > /tmp/tool_list.yml && \
+    install-tools /tmp/tool_list.yml && \
     if [ -x /tool_deps/_conda/bin/conda ]; then /tool_deps/_conda/bin/conda clean --all --yes; fi && \
     rm -f /tmp/tool_list.yml
 

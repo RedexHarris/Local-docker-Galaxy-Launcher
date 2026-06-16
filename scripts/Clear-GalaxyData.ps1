@@ -212,8 +212,39 @@ function Clear-GeneratedFiles {
         return
     }
 
-    $cleanupScript = @'
+$cleanupScript = @'
 set -eu
+
+zero_or_remove_file() {
+    file="$1"
+    if [ ! -e "$file" ]; then
+        return 0
+    fi
+
+    if command -v shred >/dev/null 2>&1; then
+        error_file="$(mktemp)"
+        if shred -n 0 -z -u -- "$file" 2>"$error_file"; then
+            rm -f -- "$error_file"
+            return 0
+        fi
+
+        if [ ! -e "$file" ]; then
+            rm -f -- "$error_file"
+            return 0
+        fi
+
+        cat "$error_file" >&2
+        rm -f -- "$error_file"
+        return 1
+    fi
+
+    rm -f -- "$file" || {
+        if [ ! -e "$file" ]; then
+            return 0
+        fi
+        return 1
+    }
+}
 
 cleanup_dir() {
     path="$1"
@@ -232,11 +263,9 @@ cleanup_dir() {
     esac
 
     if [ -d "$path" ]; then
-        if command -v shred >/dev/null 2>&1; then
-            find "$path" -type f -exec shred -n 0 -z -u -- {} +
-        else
-            find "$path" -type f -exec rm -f -- {} +
-        fi
+        while IFS= read -r -d '' file; do
+            zero_or_remove_file "$file"
+        done < <(find "$path" -type f -print0)
         find "$path" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
     fi
 }

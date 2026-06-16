@@ -39,8 +39,6 @@ Assert-Path ".gitattributes"
 Assert-Path "Dockerfile"
 Assert-Path "docker-compose.yml"
 Assert-Path ".env.example"
-Assert-Path "tool_list.yml"
-Assert-Path "tools.selected.json"
 Assert-Path "Start-Galaxy.exe"
 Assert-Path "src\LocalGalaxyLauncher\Program.cs"
 Assert-Path "scripts\Build-Launcher.ps1"
@@ -67,8 +65,6 @@ foreach ($path in @(
     "docker-compose.yml",
     "README.md",
     "start-galaxy.sh",
-    "tool_list.yml",
-    "tools.selected.json",
     "src\LocalGalaxyLauncher\Program.cs",
     "scripts\Build-Launcher.ps1",
     "scripts\Start-Galaxy.ps1",
@@ -80,6 +76,17 @@ foreach ($path in @(
     "scripts\Test-Project.ps1"
 )) {
     Test-LfLineEndings $path
+}
+
+foreach ($path in @(
+    "tool_list.yml",
+    "tools.selected.json"
+)) {
+    if (Test-Path (Join-Path $ProjectRoot $path)) {
+        Test-LfLineEndings $path
+    } else {
+        Write-Host "OK  $path absent; it is generated locally and ignored by Git"
+    }
 }
 
 if (Get-Command docker -ErrorAction SilentlyContinue) {
