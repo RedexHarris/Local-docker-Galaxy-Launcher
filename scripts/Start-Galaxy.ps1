@@ -530,7 +530,7 @@ function Sync-RemovedToolsIfNeeded {
         return
     }
 
-    Set-Status "Removing unchecked tools from running Galaxy..."
+    Set-Status "Removing tools that are no longer selected from running Galaxy..."
     $scriptPath = Join-Path $PSScriptRoot "Sync-GalaxyTools.ps1"
     try {
         Invoke-LoggedCommand -File "powershell" -Arguments @(
@@ -960,6 +960,27 @@ function Open-DockerDesktopApp {
     Start-Process "Docker Desktop"
 }
 
+function Start-DockerStorageMoveFlow {
+    param([string]$TargetPath)
+
+    if (-not $TargetPath.Trim()) {
+        throw "Choose a target folder first."
+    }
+
+    if (-not (Test-Path $TargetPath)) {
+        New-Item -ItemType Directory -Path $TargetPath | Out-Null
+    }
+
+    [System.Windows.Forms.Clipboard]::SetText($TargetPath)
+    Open-DockerDesktopApp
+    [System.Windows.Forms.MessageBox]::Show(
+        "The target path has been copied to the clipboard.`r`n`r`nIn Docker Desktop, open Settings > Resources > Advanced, set Disk image location to this folder, then click Apply & restart.`r`n`r`nDocker Desktop will move existing images, containers, and volumes by its official migration flow.",
+        "Move Docker Data",
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Information
+    ) | Out-Null
+}
+
 function Open-DockerStorageWindow {
     $storageForm = [System.Windows.Forms.Form]::new()
     $storageForm.Text = "Docker Storage"
@@ -1012,29 +1033,23 @@ function Open-DockerStorageWindow {
     })
     $storageForm.Controls.Add($browseButton)
 
-    $openDockerButton = [System.Windows.Forms.Button]::new()
-    $openDockerButton.Text = "Open Docker"
-    $openDockerButton.Location = [System.Drawing.Point]::new(18, 410)
-    $openDockerButton.Size = [System.Drawing.Size]::new(120, 32)
-    $openDockerButton.Add_Click({
+    $moveDockerDataButton = [System.Windows.Forms.Button]::new()
+    $moveDockerDataButton.Text = "Move Docker data"
+    $moveDockerDataButton.Location = [System.Drawing.Point]::new(18, 410)
+    $moveDockerDataButton.Size = [System.Drawing.Size]::new(150, 32)
+    $moveDockerDataButton.Add_Click({
         try {
-            Open-DockerDesktopApp
-            [System.Windows.Forms.MessageBox]::Show(
-                "In Docker Desktop, open Settings > Resources > Advanced, set Disk image location to the selected folder, then click Apply & restart. Docker Desktop will move existing images, containers, and volumes.",
-                "Docker Storage",
-                [System.Windows.Forms.MessageBoxButtons]::OK,
-                [System.Windows.Forms.MessageBoxIcon]::Information
-            ) | Out-Null
+            Start-DockerStorageMoveFlow -TargetPath $targetBox.Text
         } catch {
-            [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Docker Storage", "OK", "Error") | Out-Null
+            [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Move Docker Data", "OK", "Error") | Out-Null
         }
     })
-    $storageForm.Controls.Add($openDockerButton)
+    $storageForm.Controls.Add($moveDockerDataButton)
 
     $copyButton = [System.Windows.Forms.Button]::new()
     $copyButton.Text = "Copy path"
-    $copyButton.Location = [System.Drawing.Point]::new(150, 410)
-    $copyButton.Size = [System.Drawing.Size]::new(100, 32)
+    $copyButton.Location = [System.Drawing.Point]::new(180, 410)
+    $copyButton.Size = [System.Drawing.Size]::new(90, 32)
     $copyButton.Add_Click({
         if ($targetBox.Text) {
             [System.Windows.Forms.Clipboard]::SetText($targetBox.Text)
@@ -1044,8 +1059,8 @@ function Open-DockerStorageWindow {
 
     $openTargetButton = [System.Windows.Forms.Button]::new()
     $openTargetButton.Text = "Open folder"
-    $openTargetButton.Location = [System.Drawing.Point]::new(262, 410)
-    $openTargetButton.Size = [System.Drawing.Size]::new(110, 32)
+    $openTargetButton.Location = [System.Drawing.Point]::new(282, 410)
+    $openTargetButton.Size = [System.Drawing.Size]::new(105, 32)
     $openTargetButton.Add_Click({
         if ($targetBox.Text) {
             if (-not (Test-Path $targetBox.Text)) {
@@ -1056,17 +1071,30 @@ function Open-DockerStorageWindow {
     })
     $storageForm.Controls.Add($openTargetButton)
 
+    $openDockerButton = [System.Windows.Forms.Button]::new()
+    $openDockerButton.Text = "Open Docker"
+    $openDockerButton.Location = [System.Drawing.Point]::new(399, 410)
+    $openDockerButton.Size = [System.Drawing.Size]::new(115, 32)
+    $openDockerButton.Add_Click({
+        try {
+            Open-DockerDesktopApp
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Docker Storage", "OK", "Error") | Out-Null
+        }
+    })
+    $storageForm.Controls.Add($openDockerButton)
+
     $refreshStorageButton = [System.Windows.Forms.Button]::new()
     $refreshStorageButton.Text = "Refresh"
     $refreshStorageButton.Location = [System.Drawing.Point]::new(536, 410)
-    $refreshStorageButton.Size = [System.Drawing.Size]::new(90, 32)
+    $refreshStorageButton.Size = [System.Drawing.Size]::new(80, 32)
     $refreshStorageButton.Add_Click({ $summaryBox.Text = Get-DockerStorageSummary })
     $storageForm.Controls.Add($refreshStorageButton)
 
     $closeStorageButton = [System.Windows.Forms.Button]::new()
     $closeStorageButton.Text = "Close"
-    $closeStorageButton.Location = [System.Drawing.Point]::new(638, 410)
-    $closeStorageButton.Size = [System.Drawing.Size]::new(90, 32)
+    $closeStorageButton.Location = [System.Drawing.Point]::new(628, 410)
+    $closeStorageButton.Size = [System.Drawing.Size]::new(80, 32)
     $closeStorageButton.Add_Click({ $storageForm.Close() })
     $storageForm.Controls.Add($closeStorageButton)
 

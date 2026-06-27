@@ -24,7 +24,7 @@
 
 - 提供 `Compact disk` 压缩功能：清理数据后可停止 Galaxy、对 Docker 数据盘执行 TRIM、关闭 Docker Desktop/WSL，并压缩 Docker Desktop 的 VHDX 虚拟磁盘，把已释放空间尽量还给 Windows；不删除镜像、容器、卷、Galaxy 数据或已安装工具。
 
-- 提供 `Docker storage` 辅助窗口：查看当前 Docker Desktop 虚拟磁盘位置和大小，选择目标文件夹并打开 Docker Desktop。Docker Desktop 的镜像、容器和 volume 是全局存储，不能按单个项目指定构建目录；需要迁移时，在 Docker Desktop 的 `Settings > Resources > Advanced > Disk image location` 中应用新路径。
+- 提供 `Docker storage` 辅助窗口：查看当前 Docker Desktop 虚拟磁盘位置和大小，选择目标文件夹后点击 `Move Docker data` 打开 Docker Desktop 迁移流程。Docker Desktop 的镜像、容器和 volume 是全局存储，不能按单个项目指定构建目录；需要迁移时，在 Docker Desktop 的 `Settings > Resources > Advanced > Disk image location` 中应用新路径。
 
 - `tools.selected.json` 保存当前选择，`tool_list.yml` 由 `scripts/Update-ToolList.ps1` 从 Galaxy Tool Shed 拉取最新可安装 revision 生成；这些文件是本地用户状态，已被 `.gitignore` 忽略。
 
@@ -92,7 +92,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Update-ToolList.ps
 
 Docker Desktop 的虚拟磁盘不能在 Galaxy 运行清理时同步压缩：清理历史需要容器运行，而压缩 `docker_data.vhdx` 或 `ext4.vhdx` 需要停止 Docker Desktop/WSL。需要把 C 盘可用空间真正还给 Windows 时，先点击 `Clear data`，再点击 `Compact disk`。压缩过程可能请求管理员权限，会先对 Docker 数据盘执行 `fstrim`，再停止当前机器上的 Docker Desktop/WSL；它只压缩虚拟磁盘文件，不删除 Docker 镜像、容器、卷、Galaxy 数据或已安装工具。压缩完成后 Docker 会保持停止状态，下次点击 `Start and open login` 会按原状态继续启动容器。
 
-如果希望以后构建的镜像、容器和 volume 不再占用 C 盘，点击启动器里的 `Docker storage`，选择一个目标文件夹并复制路径，然后打开 Docker Desktop，在 `Settings > Resources > Advanced > Disk image location` 中选择该路径并 `Apply & restart`。Docker Desktop 会按官方流程迁移已有 Docker 数据；完成后再回到启动器启动 Galaxy。
+如果希望以后构建的镜像、容器和 volume 不再占用 C 盘，点击启动器里的 `Docker storage`，选择一个目标文件夹，然后点击 `Move Docker data`。启动器会复制目标路径并打开 Docker Desktop；在 `Settings > Resources > Advanced > Disk image location` 中选择该路径并 `Apply & restart`。Docker Desktop 会按官方流程迁移已有 Docker 数据；完成后再回到启动器启动 Galaxy。
 
 上传到 GitHub 前，可以在启动器点击 `Clear logs` 清空项目目录里的 `launcher.log`、`tool-manager.log` 和 `compact-docker-disk.log`；这不会影响 Galaxy 数据、Docker 容器或已安装工具。
 

@@ -21,14 +21,19 @@ $LogFile = Join-Path $ProjectRoot "tool-manager.log"
 $RemovedPath = Join-Path $ProjectRoot "tools.removed.json"
 $EnvFile = Join-Path $ProjectRoot ".env"
 
-$script:Grid = $null
+$script:SelectedGrid = $null
+$script:SearchGrid = $null
 $script:StatusLabel = $null
 $script:SearchBox = $null
-$script:RowKeys = @{}
+$script:SelectedRowKeys = @{}
+$script:SearchRowKeys = @{}
 $script:ApplyProgressBar = $null
 $script:ApplyButton = $null
 $script:SearchButton = $null
 $script:CurrentCommandProcess = $null
+$script:SuppressGridEvents = $false
+$script:SearchPlaceholderActive = $false
+$SearchPlaceholder = "Enter tool name to search"
 
 function ConvertTo-Array {
     param([object]$Value)
@@ -175,15 +180,16 @@ function Write-PendingRemovedTools {
     [System.IO.File]::WriteAllText($RemovedPath, (($json -replace "`r`n", "`n") -replace "`r", "`n") + "`n", [System.Text.UTF8Encoding]::new($false))
 }
 
-function Add-ToolRow {
+function Add-GridRow {
     param(
+        [System.Windows.Forms.DataGridView]$Grid,
+        [hashtable]$RowKeys,
         [string]$Name,
         [string]$Owner,
         [string]$Section = "Tools",
         [string]$Description = "",
         [string]$Updated = "",
-        [string]$Downloads = "",
-        [bool]$Selected = $false
+        [string]$Downloads = ""
     )
 
     if (-not $Name -or -not $Owner) {
@@ -191,11 +197,9 @@ function Add-ToolRow {
     }
 
     $key = Get-Key -Owner $Owner -Name $Name
-    if ($script:RowKeys.ContainsKey($key)) {
-        $row = $script:Grid.Rows[$script:RowKeys[$key]]
-        if ($Selected) {
-            $row.Cells["Selected"].Value = $true
-        }
+    if ($RowKeys.ContainsKey($key)) {
+        $row = $Grid.Rows[$RowKeys[$key]]
+        $row.Cells["Section"].Value = if ($Section) { $Section } else { "Tools" }
         if ($Description) {
             $row.Cells["Description"].Value = $Description
         }
@@ -208,10 +212,9 @@ function Add-ToolRow {
         return
     }
 
-    $index = $script:Grid.Rows.Add()
-    $script:RowKeys[$key] = $index
-    $row = $script:Grid.Rows[$index]
-    $row.Cells["Selected"].Value = $Selected
+    $index = $Grid.Rows.Add()
+    $RowKeys[$key] = $index
+    $row = $Grid.Rows[$index]
     $row.Cells["Owner"].Value = $Owner
     $row.Cells["Name"].Value = $Name
     $row.Cells["Section"].Value = if ($Section) { $Section } else { "Tools" }
@@ -221,28 +224,56 @@ function Add-ToolRow {
     $row.Cells["Key"].Value = $key
 }
 
-function Load-SelectedTools {
-    $tools = Read-SelectedTools
-    foreach ($tool in $tools) {
-        Add-ToolRow `
-            -Name ([string]$tool.name) `
-            -Owner ([string]$tool.owner) `
-            -Section ([string]$tool.section) `
-            -Selected $true
-    }
-    Add-Log ("Loaded {0} selected tools." -f (ConvertTo-Array $tools).Count)
+function Add-SelectedToolRow {
+    param(
+        [string]$Name,
+        [string]$Owner,
+        [string]$Section = "Tools",
+        [string]$Description = "",
+        [string]$Updated = "",
+        [string]$Downloads = ""
+    )
+
+    Add-GridRow `
+        -Grid $script:SelectedGrid `
+        -RowKeys $script:SelectedRowKeys `
+        -Name $Name `
+        -Owner $Owner `
+        -Section $Section `
+        -Description $Description `
+        -Updated $Updated `
+        -Downloads $Downloads
 }
 
-function Refresh-GridSelectionFromSavedSelection {
-    $selectedByKey = @{}
-    foreach ($tool in (ConvertTo-Array (Read-SelectedTools))) {
-        if (-not $tool.name -or -not $tool.owner) {
-            continue
-        }
-        $selectedByKey[(Get-Key -Owner ([string]$tool.owner) -Name ([string]$tool.name))] = $true
-    }
+function Add-SearchResultRow {
+    param(
+        [string]$Name,
+        [string]$Owner,
+        [string]$Section = "Tools",
+        [string]$Description = "",
+        [string]$Updated = "",
+        [string]$Downloads = ""
+    )
 
-    foreach ($row in $script:Grid.Rows) {
+    Add-GridRow `
+        -Grid $script:SearchGrid `
+        -RowKeys $script:SearchRowKeys `
+        -Name $Name `
+        -Owner $Owner `
+        -Section $Section `
+        -Description $Description `
+        -Updated $Updated `
+        -Downloads $Downloads
+}
+
+function Rebuild-GridRowKeys {
+    param(
+        [System.Windows.Forms.DataGridView]$Grid,
+        [hashtable]$RowKeys
+    )
+
+    $RowKeys.Clear()
+    foreach ($row in $Grid.Rows) {
         if ($row.IsNewRow) {
             continue
         }
@@ -251,11 +282,46 @@ function Refresh-GridSelectionFromSavedSelection {
         if (-not $name -or -not $owner) {
             continue
         }
-        $key = Get-Key -Owner $owner -Name $name
-        $row.Cells["Selected"].Value = $selectedByKey.ContainsKey($key)
+        $RowKeys[(Get-Key -Owner $owner -Name $name)] = $row.Index
+    }
+}
+
+function Load-SelectedTools {
+    $tools = Read-SelectedTools
+    foreach ($tool in $tools) {
+        Add-SelectedToolRow `
+            -Name ([string]$tool.name) `
+            -Owner ([string]$tool.owner) `
+            -Section ([string]$tool.section)
+    }
+    Add-Log ("Loaded {0} selected tools." -f (ConvertTo-Array $tools).Count)
+}
+
+function Refresh-GridSelectionFromSavedSelection {
+    $selectedByKey = @{}
+    $savedTools = @(ConvertTo-Array (Read-SelectedTools))
+    foreach ($tool in $savedTools) {
+        if (-not $tool.name -or -not $tool.owner) {
+            continue
+        }
+        $selectedByKey[(Get-Key -Owner ([string]$tool.owner) -Name ([string]$tool.name))] = $true
     }
 
-    Add-Log ("Synced visible checkboxes with {0} saved selected tools." -f $selectedByKey.Count)
+    $script:SuppressGridEvents = $true
+    try {
+        $script:SelectedGrid.Rows.Clear()
+        $script:SelectedRowKeys.Clear()
+        foreach ($tool in $savedTools) {
+            Add-SelectedToolRow `
+                -Name ([string]$tool.name) `
+                -Owner ([string]$tool.owner) `
+                -Section ([string]$tool.section)
+        }
+    } finally {
+        $script:SuppressGridEvents = $false
+    }
+
+    Add-Log ("Synced selected tools with {0} saved selected tools." -f $selectedByKey.Count)
 }
 
 function Search-OfficialTools {
@@ -266,6 +332,14 @@ function Search-OfficialTools {
     }
 
     Add-Log "Searching Galaxy Tool Shed..."
+    $script:SuppressGridEvents = $true
+    try {
+        $script:SearchGrid.Rows.Clear()
+        $script:SearchRowKeys.Clear()
+    } finally {
+        $script:SuppressGridEvents = $false
+    }
+
     $escaped = [uri]::EscapeDataString($Query.Trim())
     $uri = "$ToolShedUrl/api/repositories?q=$escaped&page_size=100"
     $result = Invoke-RestMethod -Uri $uri -UseBasicParsing
@@ -283,21 +357,144 @@ function Search-OfficialTools {
         if (-not $repository.name -or -not $owner) {
             continue
         }
-        Add-ToolRow `
+        $key = Get-Key -Owner $owner -Name ([string]$repository.name)
+        if ($script:SelectedRowKeys.ContainsKey($key)) {
+            continue
+        }
+        Add-SearchResultRow `
             -Name ([string]$repository.name) `
             -Owner $owner `
             -Section "Tools" `
             -Description ([string]$repository.description) `
             -Updated (Get-Updated -Repository $repository) `
-            -Downloads ([string]$repository.times_downloaded) `
-            -Selected $false
+            -Downloads ([string]$repository.times_downloaded)
         $count++
     }
-    Add-Log ("Added {0} Tool Shed search results." -f $count)
+    Add-Log ("Loaded {0} Tool Shed search results." -f $count)
+}
+
+function Get-ToolFromRow {
+    param([System.Windows.Forms.DataGridViewRow]$Row)
+
+    if (-not $Row -or $Row.IsNewRow) {
+        return $null
+    }
+
+    $name = [string]$Row.Cells["Name"].Value
+    $owner = [string]$Row.Cells["Owner"].Value
+    if (-not $name -or -not $owner) {
+        return $null
+    }
+
+    return [pscustomobject]@{
+        name = $name
+        owner = $owner
+        section = if ($Row.Cells["Section"].Value) { [string]$Row.Cells["Section"].Value } else { "Tools" }
+        description = if ($Row.Cells["Description"].Value) { [string]$Row.Cells["Description"].Value } else { "" }
+        updated = if ($Row.Cells["Updated"].Value) { [string]$Row.Cells["Updated"].Value } else { "" }
+        downloads = if ($Row.Cells["Downloads"].Value) { [string]$Row.Cells["Downloads"].Value } else { "" }
+    }
+}
+
+function Add-SearchRowToSelectedTools {
+    param([System.Windows.Forms.DataGridViewRow]$Row)
+
+    $tool = Get-ToolFromRow -Row $Row
+    if (-not $tool) {
+        return
+    }
+
+    Add-SelectedToolRow `
+        -Name ([string]$tool.name) `
+        -Owner ([string]$tool.owner) `
+        -Section ([string]$tool.section) `
+        -Description ([string]$tool.description) `
+        -Updated ([string]$tool.updated) `
+        -Downloads ([string]$tool.downloads)
+}
+
+function Select-GridRowByKey {
+    param(
+        [System.Windows.Forms.DataGridView]$Grid,
+        [hashtable]$RowKeys,
+        [string]$Owner,
+        [string]$Name
+    )
+
+    if (-not $Grid -or -not $Owner -or -not $Name) {
+        return
+    }
+
+    $key = Get-Key -Owner $Owner -Name $Name
+    if (-not $RowKeys.ContainsKey($key)) {
+        return
+    }
+
+    $row = $Grid.Rows[$RowKeys[$key]]
+    $Grid.ClearSelection()
+    $row.Selected = $true
+    if ($Grid.Columns.Contains("Name")) {
+        $Grid.CurrentCell = $row.Cells["Name"]
+    }
+    if ($row.Index -ge 0) {
+        $Grid.FirstDisplayedScrollingRowIndex = $row.Index
+    }
+}
+
+function MoveSelectedSearchToolRight {
+    if (-not $script:SearchGrid -or -not $script:SearchGrid.CurrentRow) {
+        Add-Log "Select a search result first."
+        return
+    }
+
+    $row = $script:SearchGrid.CurrentRow
+    $tool = Get-ToolFromRow -Row $row
+    if (-not $tool) {
+        Add-Log "Select a valid search result first."
+        return
+    }
+
+    Add-SearchRowToSelectedTools -Row $row
+    $script:SearchGrid.Rows.Remove($row)
+    Rebuild-GridRowKeys -Grid $script:SearchGrid -RowKeys $script:SearchRowKeys
+    Select-GridRowByKey -Grid $script:SelectedGrid -RowKeys $script:SelectedRowKeys -Owner ([string]$tool.owner) -Name ([string]$tool.name)
+    Add-Log ("Moved right to selected tools: {0}/{1}" -f $tool.owner, $tool.name)
+}
+
+function MoveSelectedToolLeft {
+    if (-not $script:SelectedGrid -or -not $script:SelectedGrid.CurrentRow) {
+        Add-Log "Select a selected tool first."
+        return
+    }
+
+    $row = $script:SelectedGrid.CurrentRow
+    $tool = Get-ToolFromRow -Row $row
+    if (-not $tool) {
+        Add-Log "Select a valid selected tool first."
+        return
+    }
+
+    $script:SuppressGridEvents = $true
+    try {
+        $script:SelectedGrid.Rows.Remove($row)
+        Rebuild-GridRowKeys -Grid $script:SelectedGrid -RowKeys $script:SelectedRowKeys
+        Add-SearchResultRow `
+            -Name ([string]$tool.name) `
+            -Owner ([string]$tool.owner) `
+            -Section ([string]$tool.section) `
+            -Description ([string]$tool.description) `
+            -Updated ([string]$tool.updated) `
+            -Downloads ([string]$tool.downloads)
+        Select-GridRowByKey -Grid $script:SearchGrid -RowKeys $script:SearchRowKeys -Owner ([string]$tool.owner) -Name ([string]$tool.name)
+    } finally {
+        $script:SuppressGridEvents = $false
+    }
+    Add-Log ("Moved left out of selected tools: {0}/{1}" -f $tool.owner, $tool.name)
 }
 
 function Save-Selection {
-    $script:Grid.EndEdit()
+    $script:SelectedGrid.EndEdit()
+    $script:SearchGrid.EndEdit()
     $previousSelection = @(ConvertTo-Array (Read-SelectedTools))
     $previousByKey = @{}
     foreach ($tool in $previousSelection) {
@@ -308,12 +505,8 @@ function Save-Selection {
 
     $selected = @()
     $selectedByKey = @{}
-    foreach ($row in $script:Grid.Rows) {
+    foreach ($row in $script:SelectedGrid.Rows) {
         if ($row.IsNewRow) {
-            continue
-        }
-        $isSelected = $row.Cells["Selected"].Value
-        if (-not $isSelected) {
             continue
         }
         $name = [string]$row.Cells["Name"].Value
@@ -626,7 +819,7 @@ function Apply-ToolChanges {
         } catch {
             Add-Log "Could not refresh visible checkboxes after failed apply: $($_.Exception.Message)"
         }
-        Set-ApplyProgress -Percent 0 -Message "Tool changes were not fully applied. Failed installs were unchecked if Galaxy did not complete them."
+        Set-ApplyProgress -Percent 0 -Message "Tool changes were not fully applied. Failed installs were removed from selection if Galaxy did not complete them."
         throw
     } finally {
         if ($script:ApplyButton) {
@@ -636,6 +829,82 @@ function Apply-ToolChanges {
             $script:SearchButton.Enabled = $true
         }
     }
+}
+
+function Set-SearchPlaceholder {
+    if (-not $script:SearchBox) {
+        return
+    }
+    $script:SearchPlaceholderActive = $true
+    $script:SearchBox.Text = $SearchPlaceholder
+    $script:SearchBox.ForeColor = [System.Drawing.Color]::Gray
+}
+
+function Clear-SearchPlaceholder {
+    if (-not $script:SearchBox -or -not $script:SearchPlaceholderActive) {
+        return
+    }
+    $script:SearchPlaceholderActive = $false
+    $script:SearchBox.Text = ""
+    $script:SearchBox.ForeColor = [System.Drawing.SystemColors]::WindowText
+}
+
+function Restore-SearchPlaceholderIfEmpty {
+    if (-not $script:SearchBox) {
+        return
+    }
+    if (-not $script:SearchBox.Text.Trim()) {
+        Set-SearchPlaceholder
+    }
+}
+
+function Get-SearchQuery {
+    if (-not $script:SearchBox -or $script:SearchPlaceholderActive) {
+        return ""
+    }
+    return $script:SearchBox.Text.Trim()
+}
+
+function New-ToolGrid {
+    param(
+        [int]$X,
+        [int]$Y,
+        [int]$Width,
+        [int]$Height
+    )
+
+    $grid = [System.Windows.Forms.DataGridView]::new()
+    $grid.Location = [System.Drawing.Point]::new($X, $Y)
+    $grid.Size = [System.Drawing.Size]::new($Width, $Height)
+    $grid.AllowUserToAddRows = $false
+    $grid.AllowUserToDeleteRows = $false
+    $grid.AutoSizeColumnsMode = "None"
+    $grid.SelectionMode = "FullRowSelect"
+    $grid.MultiSelect = $false
+    $grid.RowHeadersVisible = $false
+
+    foreach ($columnInfo in @(
+        @{ Name = "Owner"; Header = "Owner"; Width = 110; ReadOnly = $true },
+        @{ Name = "Name"; Header = "Name"; Width = 165; ReadOnly = $true },
+        @{ Name = "Section"; Header = "Section"; Width = 130; ReadOnly = $false },
+        @{ Name = "Updated"; Header = "Updated"; Width = 130; ReadOnly = $true },
+        @{ Name = "Downloads"; Header = "Downloads"; Width = 85; ReadOnly = $true },
+        @{ Name = "Description"; Header = "Description"; Width = 345; ReadOnly = $true },
+        @{ Name = "Key"; Header = "Key"; Width = 80; ReadOnly = $true }
+    )) {
+        $column = [System.Windows.Forms.DataGridViewTextBoxColumn]::new()
+        $column.Name = $columnInfo.Name
+        $column.HeaderText = $columnInfo.Header
+        $column.Width = $columnInfo.Width
+        $column.ReadOnly = [bool]$columnInfo.ReadOnly
+        $column.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::NotSortable
+        if ($columnInfo.Name -eq "Key") {
+            $column.Visible = $false
+        }
+        $grid.Columns.Add($column) | Out-Null
+    }
+
+    return $grid
 }
 
 try {
@@ -653,6 +922,7 @@ $form.StartPosition = "CenterScreen"
 $form.ClientSize = [System.Drawing.Size]::new(980, 610)
 $form.FormBorderStyle = "FixedSingle"
 $form.MaximizeBox = $false
+$form.Font = [System.Drawing.Font]::new("Segoe UI", 9)
 
 $title = [System.Windows.Forms.Label]::new()
 $title.Text = "Galaxy Tool Shed Manager"
@@ -662,7 +932,7 @@ $title.Location = [System.Drawing.Point]::new(18, 16)
 $form.Controls.Add($title)
 
 $hint = [System.Windows.Forms.Label]::new()
-$hint.Text = "Search Tool Shed, check tools to keep, then apply changes to install checked tools and remove unchecked tools."
+$hint.Text = "Search Tool Shed, move results right to use them, move selected tools left to uninstall them, then apply changes."
 $hint.Font = [System.Drawing.Font]::new("Segoe UI", 9)
 $hint.AutoSize = $false
 $hint.Location = [System.Drawing.Point]::new(20, 50)
@@ -673,8 +943,10 @@ $searchBox = [System.Windows.Forms.TextBox]::new()
 $script:SearchBox = $searchBox
 $searchBox.Location = [System.Drawing.Point]::new(22, 82)
 $searchBox.Size = [System.Drawing.Size]::new(320, 24)
-$searchBox.Text = "kraken2"
+$searchBox.Add_Enter({ Clear-SearchPlaceholder })
+$searchBox.Add_Leave({ Restore-SearchPlaceholderIfEmpty })
 $form.Controls.Add($searchBox)
+Set-SearchPlaceholder
 
 $searchButton = [System.Windows.Forms.Button]::new()
 $script:SearchButton = $searchButton
@@ -683,13 +955,14 @@ $searchButton.Location = [System.Drawing.Point]::new(354, 80)
 $searchButton.Size = [System.Drawing.Size]::new(140, 30)
 $searchButton.Add_Click({
     try {
-        Search-OfficialTools -Query $script:SearchBox.Text
+        Search-OfficialTools -Query (Get-SearchQuery)
     } catch {
         Add-Log "Error: $($_.Exception.Message)"
         [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Galaxy Tool Manager", "OK", "Error") | Out-Null
     }
 })
 $form.Controls.Add($searchButton)
+$form.AcceptButton = $searchButton
 
 $applyButton = [System.Windows.Forms.Button]::new()
 $script:ApplyButton = $applyButton
@@ -713,44 +986,49 @@ $closeButton.Size = [System.Drawing.Size]::new(110, 30)
 $closeButton.Add_Click({ $form.Close() })
 $form.Controls.Add($closeButton)
 
-$grid = [System.Windows.Forms.DataGridView]::new()
-$script:Grid = $grid
-$grid.Location = [System.Drawing.Point]::new(22, 124)
-$grid.Size = [System.Drawing.Size]::new(918, 410)
-$grid.AllowUserToAddRows = $false
-$grid.AllowUserToDeleteRows = $false
-$grid.AutoSizeColumnsMode = "None"
-$grid.SelectionMode = "FullRowSelect"
-$grid.MultiSelect = $false
-$grid.RowHeadersVisible = $false
+$searchLabel = [System.Windows.Forms.Label]::new()
+$searchLabel.Text = "Search results"
+$searchLabel.Font = [System.Drawing.Font]::new("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$searchLabel.AutoSize = $false
+$searchLabel.Location = [System.Drawing.Point]::new(22, 122)
+$searchLabel.Size = [System.Drawing.Size]::new(420, 20)
+$form.Controls.Add($searchLabel)
 
-$selectedColumn = [System.Windows.Forms.DataGridViewCheckBoxColumn]::new()
-$selectedColumn.Name = "Selected"
-$selectedColumn.HeaderText = "Use"
-$selectedColumn.Width = 45
-$grid.Columns.Add($selectedColumn) | Out-Null
+$searchGrid = New-ToolGrid -X 22 -Y 144 -Width 420 -Height 390
+$script:SearchGrid = $searchGrid
+$form.Controls.Add($searchGrid)
 
-foreach ($columnInfo in @(
-    @{ Name = "Owner"; Header = "Owner"; Width = 110; ReadOnly = $true },
-    @{ Name = "Name"; Header = "Name"; Width = 160; ReadOnly = $true },
-    @{ Name = "Section"; Header = "Section"; Width = 130; ReadOnly = $false },
-    @{ Name = "Updated"; Header = "Updated"; Width = 135; ReadOnly = $true },
-    @{ Name = "Downloads"; Header = "Downloads"; Width = 80; ReadOnly = $true },
-    @{ Name = "Description"; Header = "Description"; Width = 330; ReadOnly = $true },
-    @{ Name = "Key"; Header = "Key"; Width = 80; ReadOnly = $true }
-)) {
-    $column = [System.Windows.Forms.DataGridViewTextBoxColumn]::new()
-    $column.Name = $columnInfo.Name
-    $column.HeaderText = $columnInfo.Header
-    $column.Width = $columnInfo.Width
-    $column.ReadOnly = [bool]$columnInfo.ReadOnly
-    if ($columnInfo.Name -eq "Key") {
-        $column.Visible = $false
-    }
-    $grid.Columns.Add($column) | Out-Null
-}
+$moveToolTip = [System.Windows.Forms.ToolTip]::new()
 
-$form.Controls.Add($grid)
+$moveRightButton = [System.Windows.Forms.Button]::new()
+$moveRightButton.Text = ">"
+$moveRightButton.Font = $form.Font
+$moveRightButton.Location = [System.Drawing.Point]::new(457, 304)
+$moveRightButton.Size = [System.Drawing.Size]::new(48, 30)
+$moveRightButton.Add_Click({ MoveSelectedSearchToolRight })
+$moveToolTip.SetToolTip($moveRightButton, "Move selected search result right to selected tools")
+$form.Controls.Add($moveRightButton)
+
+$moveLeftButton = [System.Windows.Forms.Button]::new()
+$moveLeftButton.Text = "<"
+$moveLeftButton.Font = $form.Font
+$moveLeftButton.Location = [System.Drawing.Point]::new(457, 344)
+$moveLeftButton.Size = [System.Drawing.Size]::new(48, 30)
+$moveLeftButton.Add_Click({ MoveSelectedToolLeft })
+$moveToolTip.SetToolTip($moveLeftButton, "Move selected tool left to uninstall/remove selection")
+$form.Controls.Add($moveLeftButton)
+
+$selectedLabel = [System.Windows.Forms.Label]::new()
+$selectedLabel.Text = "Installed / selected tools"
+$selectedLabel.Font = [System.Drawing.Font]::new("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$selectedLabel.AutoSize = $false
+$selectedLabel.Location = [System.Drawing.Point]::new(520, 122)
+$selectedLabel.Size = [System.Drawing.Size]::new(420, 20)
+$form.Controls.Add($selectedLabel)
+
+$selectedGrid = New-ToolGrid -X 520 -Y 144 -Width 420 -Height 390
+$script:SelectedGrid = $selectedGrid
+$form.Controls.Add($selectedGrid)
 
 $applyProgressBar = [System.Windows.Forms.ProgressBar]::new()
 $script:ApplyProgressBar = $applyProgressBar
@@ -778,6 +1056,12 @@ $form.Add_FormClosing({
         } catch {
         }
     }
+})
+
+$form.Add_Shown({
+    $form.ActiveControl = $selectedGrid
+    $selectedGrid.Focus() | Out-Null
+    Restore-SearchPlaceholderIfEmpty
 })
 
 if ($ParentProcessId -gt 0) {
