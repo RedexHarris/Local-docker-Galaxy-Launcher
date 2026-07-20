@@ -18,13 +18,11 @@
 
 - 启动器会显示当前 Galaxy 容器状态，例如 `running`、`exited`、`starting`，Docker Compose 的正常状态进度不会再弹成错误。
 
-- 提供工具管理界面：从 Galaxy Tool Shed 搜索官方工具仓库，勾选并点击 `Apply changes` 后通过 Galaxy 官方 API 增量安装，取消勾选后增量卸载。
+- 提供工具管理界面：从 Galaxy Tool Shed 搜索官方工具仓库，把左侧搜索结果移动到右侧已选工具后点击 `Apply changes` 增量安装；从右侧移回左侧后增量卸载。
 
 - 提供 `Clear data` 清理功能：删除并 purge Galaxy 历史记录、数据集、输出文件，清理 Docker volume 里的实际数据文件和任务临时目录，并取消仍在运行的任务；不删除已安装工具。为提高后续 VHDX 压缩成功率，清理时会先用零覆盖即将删除的生成文件。
 
-- 提供 `Compact disk` 压缩功能：清理数据后可停止 Galaxy、对 Docker 数据盘执行 TRIM、关闭 Docker Desktop/WSL，并压缩 Docker Desktop 的 VHDX 虚拟磁盘，把已释放空间尽量还给 Windows；不删除镜像、容器、卷、Galaxy 数据或已安装工具。
-
-- 提供 `Docker storage` 辅助窗口：查看当前 Docker Desktop 虚拟磁盘位置和大小，选择目标文件夹后点击 `Move Docker data` 打开 Docker Desktop 迁移流程。Docker Desktop 的镜像、容器和 volume 是全局存储，不能按单个项目指定构建目录；需要迁移时，在 Docker Desktop 的 `Settings > Resources > Advanced > Disk image location` 中应用新路径。
+- 提供 `Compact disk` 压缩功能：清理数据后可停止 Galaxy、关闭 Docker Desktop/WSL，并压缩 Docker Desktop 的 VHDX 虚拟磁盘，把已释放空间尽量还给 Windows；不删除镜像、容器、卷、Galaxy 数据或已安装工具。
 
 - `tools.selected.json` 保存当前选择，`tool_list.yml` 由 `scripts/Update-ToolList.ps1` 从 Galaxy Tool Shed 拉取最新可安装 revision 生成；这些文件是本地用户状态，已被 `.gitignore` 忽略。
 
@@ -70,11 +68,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-Launcher.ps1
 
 - 在搜索框输入工具名，例如 `kraken2` 或 `seqsero2`。
 - 点击 `Search Tool Shed`，界面会从 Galaxy Tool Shed 拉取匹配的官方仓库列表。
-- 勾选要加入 Galaxy 的工具；取消勾选已选工具，会从运行中的 Galaxy 卸载。
-- 点击 `Apply changes` 会保存选择、启动容器，并通过 Galaxy API 只安装新增工具、只卸载取消勾选的工具。
-- 如果 Tool Shed 请求出现 504 或其他临时错误，管理器会继续检查 Galaxy 是否已经在后台完成安装；确认没有安装成功的工具会自动取消勾选，从 `tools.selected.json` 和 `tool_list.yml` 移除，并调用 Galaxy 删除接口清理半安装仓库的磁盘残留，避免下次被误认为已安装。
+- 在左侧搜索结果中选择要加入 Galaxy 的工具，点击 `>` 移到右侧已选工具；在右侧选择工具并点击 `<`，会把它移出已选列表并在运行中的 Galaxy 卸载。
+- 点击 `Apply changes` 会保存选择、启动容器，并通过 Galaxy API 只安装新增工具、只卸载移出的工具。
+- 如果 Tool Shed 请求出现 504 或其他临时错误，管理器会继续检查 Galaxy 是否已经在后台完成安装；确认没有安装成功的工具会自动从已选列表移除，从 `tools.selected.json` 和 `tool_list.yml` 移除，并调用 Galaxy 删除接口清理半安装仓库的磁盘残留，避免下次被误认为已安装。
 
-注意：首次镜像不存在时仍会构建一次，但不会使用仓库作者的个人工具列表。工具选择变更不需要重建镜像，已安装且仍被勾选的工具不会重新下载安装；只有新增工具及其依赖会下载，取消勾选的工具会通过 Galaxy API 卸载。
+注意：首次镜像不存在时仍会构建一次，但不会使用仓库作者的个人工具列表。工具选择变更不需要重建镜像，已安装且仍保留在右侧已选列表里的工具不会重新下载安装；只有新增工具及其依赖会下载，移出的工具会通过 Galaxy API 卸载。
 
 如需刷新到当前 Tool Shed 最新可安装 revision：
 
@@ -82,7 +80,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-Launcher.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Update-ToolList.ps1 -ForceResolve
 ```
 
-工具管理器默认会复用 `tool_list.metadata.json` 中没有变动过的工具 metadata，只 resolve 新增工具；手动加 `-ForceResolve` 才会刷新所有已选工具的最新 revision。刷新 revision 不会强制重装已安装工具。需要安装新勾选工具时，在启动器中点击 `Tools`，再点击 `Apply changes`。
+工具管理器默认会复用 `tool_list.metadata.json` 中没有变动过的工具 metadata，只 resolve 新增工具；手动加 `-ForceResolve` 才会刷新所有已选工具的最新 revision。刷新 revision 不会强制重装已安装工具。需要安装新工具时，在启动器中点击 `Tools`，再点击 `Apply changes`。
 
 ## 清理任务和文件
 
@@ -90,9 +88,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Update-ToolList.ps
 
 本项目的数据保存在 Docker named volume `local-usegalaxy_galaxy-export` 中，容器内路径是 `/export`。Docker 报告的卷挂载点通常是 `/var/lib/docker/volumes/local-usegalaxy_galaxy-export/_data`；在 Windows Docker Desktop 上它位于 Docker 的 Linux/WSL 虚拟磁盘中，而不是项目目录。清理后空间会先在 Docker 卷内释放并可被 Docker 复用；如果 Windows 资源管理器里的可用空间没有立刻变多，通常是 Docker Desktop 的虚拟磁盘还没有压缩。
 
-Docker Desktop 的虚拟磁盘不能在 Galaxy 运行清理时同步压缩：清理历史需要容器运行，而压缩 `docker_data.vhdx` 或 `ext4.vhdx` 需要停止 Docker Desktop/WSL。需要把 C 盘可用空间真正还给 Windows 时，先点击 `Clear data`，再点击 `Compact disk`。压缩过程可能请求管理员权限，会先对 Docker 数据盘执行 `fstrim`，再停止当前机器上的 Docker Desktop/WSL；它只压缩虚拟磁盘文件，不删除 Docker 镜像、容器、卷、Galaxy 数据或已安装工具。压缩完成后 Docker 会保持停止状态，下次点击 `Start and open login` 会按原状态继续启动容器。
-
-如果希望以后构建的镜像、容器和 volume 不再占用 C 盘，点击启动器里的 `Docker storage`，选择一个目标文件夹，然后点击 `Move Docker data`。启动器会复制目标路径并打开 Docker Desktop；在 `Settings > Resources > Advanced > Disk image location` 中选择该路径并 `Apply & restart`。Docker Desktop 会按官方流程迁移已有 Docker 数据；完成后再回到启动器启动 Galaxy。
+Docker Desktop 的虚拟磁盘不能在 Galaxy 运行清理时同步压缩：清理历史需要容器运行，而压缩 `docker_data.vhdx` 或 `ext4.vhdx` 需要停止 Docker Desktop/WSL。需要把 C 盘可用空间真正还给 Windows 时，先点击 `Clear data`，再点击 `Compact disk`。压缩过程可能请求管理员权限，会先确认 Docker Desktop VHDX 文件存在，再停止当前机器上的 Docker Desktop/WSL 并压缩虚拟磁盘；它只压缩虚拟磁盘文件，不删除 Docker 镜像、容器、卷、Galaxy 数据或已安装工具。压缩完成后 Docker 会保持停止状态，下次点击 `Start and open login` 会按原状态继续启动容器。如果压缩过程报错，启动器会尝试自动重新启动 Docker 和 Galaxy，避免 Galaxy 工具停在不可用状态。
 
 上传到 GitHub 前，可以在启动器点击 `Clear logs` 清空项目目录里的 `launcher.log`、`tool-manager.log` 和 `compact-docker-disk.log`；这不会影响 Galaxy 数据、Docker 容器或已安装工具。
 

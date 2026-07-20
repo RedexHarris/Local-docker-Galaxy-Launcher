@@ -3,7 +3,6 @@ param(
     [string]$ProjectRoot,
     [string]$VhdxPath,
     [string]$LogPath,
-    [string]$HelperImage = "local-usegalaxy:latest",
     [switch]$Elevated,
     [switch]$DryRun
 )
@@ -47,13 +46,41 @@ function Format-Size {
     return "$Bytes B"
 }
 
-function Quote-Argument {
+function ConvertTo-ProcessArgument {
     param([string]$Value)
 
-    if ($null -eq $Value) {
+    if ($null -eq $Value -or $Value.Length -eq 0) {
         return '""'
     }
-    return '"' + ($Value -replace '"', '\"') + '"'
+    if ($Value -match '^[A-Za-z0-9_.:/\\=@%+-]+$') {
+        return $Value
+    }
+
+    $builder = [System.Text.StringBuilder]::new()
+    [void]$builder.Append('"')
+    $backslashes = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashes++
+            continue
+        }
+        if ($character -eq '"') {
+            [void]$builder.Append([string]::new([char]92, ($backslashes * 2 + 1)))
+            [void]$builder.Append('"')
+            $backslashes = 0
+            continue
+        }
+        if ($backslashes -gt 0) {
+            [void]$builder.Append([string]::new([char]92, $backslashes))
+            $backslashes = 0
+        }
+        [void]$builder.Append($character)
+    }
+    if ($backslashes -gt 0) {
+        [void]$builder.Append([string]::new([char]92, ($backslashes * 2)))
+    }
+    [void]$builder.Append('"')
+    return $builder.ToString()
 }
 
 function Test-Administrator {
@@ -74,18 +101,15 @@ function Invoke-ElevatedSelf {
         "-ExecutionPolicy",
         "Bypass",
         "-File",
-        (Quote-Argument $PSCommandPath),
+        (ConvertTo-ProcessArgument $PSCommandPath),
         "-ProjectRoot",
-        (Quote-Argument $ProjectRoot),
+        (ConvertTo-ProcessArgument $ProjectRoot),
         "-LogPath",
-        (Quote-Argument $LogPath),
+        (ConvertTo-ProcessArgument $LogPath),
         "-Elevated"
     )
     if ($VhdxPath) {
-        $arguments += @("-VhdxPath", (Quote-Argument $VhdxPath))
-    }
-    if ($HelperImage) {
-        $arguments += @("-HelperImage", (Quote-Argument $HelperImage))
+        $arguments += @("-VhdxPath", (ConvertTo-ProcessArgument $VhdxPath))
     }
     if ($DryRun) {
         $arguments += "-DryRun"
@@ -157,50 +181,6 @@ function Stop-GalaxyContainerIfPossible {
     }
 }
 
-function Invoke-DockerHostTrim {
-    if (-not (Test-DockerDaemon)) {
-        Write-Step "Docker daemon is not running; skipping Docker host fstrim."
-        return
-    }
-
-    if (-not $HelperImage) {
-        Write-Step "No helper image was provided; skipping Docker host fstrim."
-        return
-    }
-
-    & docker image inspect $HelperImage *> $null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Step "Helper image $HelperImage was not found; skipping Docker host fstrim."
-        return
-    }
-
-    $trimScript = @'
-set -eu
-if ! command -v nsenter >/dev/null 2>&1 || ! command -v fstrim >/dev/null 2>&1; then
-    echo "nsenter or fstrim is not available in the helper image."
-    exit 42
-fi
-nsenter -t 1 -m -u -n -i sh -lc 'df -hT /mnt/docker-desktop-disk /var/lib/docker 2>/dev/null || true; fstrim -av'
-'@
-
-    Write-Step "Trimming free blocks inside the Docker Desktop data disk before VHDX compaction."
-    try {
-        Invoke-Native -File "docker" -Arguments @(
-            "run",
-            "--rm",
-            "--privileged",
-            "--pid=host",
-            "--entrypoint",
-            "bash",
-            $HelperImage,
-            "-lc",
-            $trimScript
-        )
-    } catch {
-        Write-Step "Docker host fstrim failed; VHDX compaction will continue. Reason: $($_.Exception.Message)"
-    }
-}
-
 function Stop-DockerDesktopProcesses {
     $processNames = @(
         "Docker Desktop",
@@ -258,9 +238,17 @@ function Get-DockerVhdxPaths {
         }
     }
 
-    $dockerWslRoot = Join-Path $env:LOCALAPPDATA "Docker\wsl"
-    if (Test-Path $dockerWslRoot) {
-        $paths += Get-ChildItem -Path $dockerWslRoot -Recurse -Force -ErrorAction SilentlyContinue -Include "*.vhdx" |
+    $searchRoots = @(
+        (Join-Path $env:LOCALAPPDATA "Docker\wsl"),
+        (Join-Path $env:LOCALAPPDATA "DockerDesktop"),
+        (Join-Path $env:PROGRAMDATA "DockerDesktop")
+    ) | Sort-Object -Unique
+
+    foreach ($root in $searchRoots) {
+        if (-not (Test-Path $root)) {
+            continue
+        }
+        $paths += Get-ChildItem -Path $root -Recurse -Force -ErrorAction SilentlyContinue -Include "*.vhdx" |
             Select-Object -ExpandProperty FullName
     }
 
@@ -370,11 +358,18 @@ if (-not $DryRun -and -not (Test-Administrator)) {
 Write-Step "Starting Docker Desktop virtual disk compaction."
 Write-Step "Project root: $ProjectRoot"
 
+$vhdxPaths = @(Get-DockerVhdxPaths)
+if (-not $vhdxPaths) {
+    throw "No Docker Desktop VHDX file was found under $env:LOCALAPPDATA\Docker\wsl."
+}
+foreach ($path in $vhdxPaths) {
+    Write-Step "Detected Docker Desktop virtual disk: $path"
+}
+
 if ($DryRun) {
-    Write-Step "Dry run: would stop the Galaxy container, trim Docker host free blocks, close Docker Desktop, run wsl.exe --shutdown, and compact VHDX files."
+    Write-Step "Dry run: would stop the Galaxy container, close Docker Desktop, run wsl.exe --shutdown, and compact VHDX files."
 } else {
     Stop-GalaxyContainerIfPossible
-    Invoke-DockerHostTrim
     Stop-DockerDesktopProcesses
 
     if (Get-Command wsl.exe -ErrorAction SilentlyContinue) {
@@ -384,11 +379,6 @@ if ($DryRun) {
     } else {
         Write-Step "wsl.exe was not found. Docker Desktop VHDX may still be mounted."
     }
-}
-
-$vhdxPaths = @(Get-DockerVhdxPaths)
-if (-not $vhdxPaths) {
-    throw "No Docker Desktop VHDX file was found under $env:LOCALAPPDATA\Docker\wsl."
 }
 
 foreach ($path in $vhdxPaths) {
