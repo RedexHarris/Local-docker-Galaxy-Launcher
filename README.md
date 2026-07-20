@@ -88,7 +88,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Update-ToolList.ps
 
 本项目的数据保存在 Docker named volume `local-usegalaxy_galaxy-export` 中，容器内路径是 `/export`。Docker 报告的卷挂载点通常是 `/var/lib/docker/volumes/local-usegalaxy_galaxy-export/_data`；在 Windows Docker Desktop 上它位于 Docker 的 Linux/WSL 虚拟磁盘中，而不是项目目录。清理后空间会先在 Docker 卷内释放并可被 Docker 复用；如果 Windows 资源管理器里的可用空间没有立刻变多，通常是 Docker Desktop 的虚拟磁盘还没有压缩。
 
-Docker Desktop 的虚拟磁盘不能在 Galaxy 运行清理时同步压缩：清理历史需要容器运行，而压缩 `docker_data.vhdx` 或 `ext4.vhdx` 需要停止 Docker Desktop/WSL。需要把 C 盘可用空间真正还给 Windows 时，先点击 `Clear data`，再点击 `Compact disk`。压缩过程可能请求管理员权限，会先确认 Docker Desktop VHDX 文件存在，再停止当前机器上的 Docker Desktop/WSL 并压缩虚拟磁盘；它只压缩虚拟磁盘文件，不删除 Docker 镜像、容器、卷、Galaxy 数据或已安装工具。压缩完成后 Docker 会保持停止状态，下次点击 `Start and open login` 会按原状态继续启动容器。如果压缩过程报错，启动器会尝试自动重新启动 Docker 和 Galaxy，避免 Galaxy 工具停在不可用状态。
+Docker Desktop 的虚拟磁盘不能在 Galaxy 运行清理时同步压缩：清理历史需要容器运行，而压缩 `docker_data.vhdx` 或 `ext4.vhdx` 需要停止 Docker Desktop/WSL。需要把 C 盘可用空间真正还给 Windows 时，先点击 `Clear data`，再点击 `Compact disk`。启动器会先用普通权限停止 Galaxy 容器；随后压缩过程可能请求管理员权限，提权后的脚本只确认 Docker Desktop VHDX 文件、停止当前机器上的 Docker Desktop/WSL，并压缩虚拟磁盘，不再调用 Docker CLI。它只压缩虚拟磁盘文件，不删除 Docker 镜像、容器、卷、Galaxy 数据或已安装工具。压缩完成后 Docker 会保持停止状态，下次点击 `Start and open login` 会按原状态继续启动容器。如果压缩过程报错，启动器会尝试自动重新启动 Docker 和 Galaxy，避免 Galaxy 工具停在不可用状态。
 
 上传到 GitHub 前，可以在启动器点击 `Clear logs` 清空项目目录里的 `launcher.log`、`tool-manager.log` 和 `compact-docker-disk.log`；这不会影响 Galaxy 数据、Docker 容器或已安装工具。
 

@@ -152,35 +152,6 @@ function Invoke-Native {
     }
 }
 
-function Test-DockerDaemon {
-    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-        return $false
-    }
-    & docker info *> $null
-    return ($LASTEXITCODE -eq 0)
-}
-
-function Stop-GalaxyContainerIfPossible {
-    if (-not (Test-DockerDaemon)) {
-        Write-Step "Docker daemon is not running; skipping docker compose stop."
-        return
-    }
-
-    Push-Location $ProjectRoot
-    try {
-        & docker compose version *> $null
-        if ($LASTEXITCODE -eq 0) {
-            Invoke-Native -File "docker" -Arguments @("compose", "stop")
-        } elseif (Get-Command docker-compose -ErrorAction SilentlyContinue) {
-            Invoke-Native -File "docker-compose" -Arguments @("stop")
-        } else {
-            Write-Step "Docker Compose is not available; skipping compose stop."
-        }
-    } finally {
-        Pop-Location
-    }
-}
-
 function Stop-DockerDesktopProcesses {
     $processNames = @(
         "Docker Desktop",
@@ -343,6 +314,7 @@ function Invoke-CompactVhdx {
     }
 }
 
+try {
 if (-not $IsWindows -and $PSVersionTable.PSEdition -eq "Core") {
     throw "Docker Desktop virtual disk compaction is only supported by this script on Windows."
 }
@@ -367,9 +339,8 @@ foreach ($path in $vhdxPaths) {
 }
 
 if ($DryRun) {
-    Write-Step "Dry run: would stop the Galaxy container, close Docker Desktop, run wsl.exe --shutdown, and compact VHDX files."
+    Write-Step "Dry run: would close Docker Desktop, run wsl.exe --shutdown, and compact VHDX files."
 } else {
-    Stop-GalaxyContainerIfPossible
     Stop-DockerDesktopProcesses
 
     if (Get-Command wsl.exe -ErrorAction SilentlyContinue) {
@@ -389,4 +360,11 @@ if ($DryRun) {
     Write-Step "Dry run complete. No containers, Docker processes, WSL sessions, or VHDX files were changed."
 } else {
     Write-Step "Docker Desktop virtual disk compaction complete. Docker is stopped; start Galaxy again when you want to use it."
+}
+} catch {
+    Write-Step "ERROR: $($_.Exception.Message)"
+    if ($_.ScriptStackTrace) {
+        Write-Step "ERROR stack: $($_.ScriptStackTrace)"
+    }
+    throw
 }

@@ -707,6 +707,12 @@ Continue?
     }
     try {
         $scriptPath = Join-Path $PSScriptRoot "Compact-DockerDisk.ps1"
+        if (Test-DockerDaemon) {
+            Set-Status "Stopping Galaxy container before disk compaction..."
+            Invoke-Compose @("stop")
+        } else {
+            Set-Status "Docker daemon is not running. Continuing with disk compaction..."
+        }
         Set-Status "Compacting Docker Desktop virtual disk. Administrator permission may be requested..."
         Invoke-LoggedCommand -File "powershell" -Arguments @(
             "-NoProfile",
