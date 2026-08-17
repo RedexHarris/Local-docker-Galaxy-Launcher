@@ -1,5 +1,6 @@
 .env
 *.log
+other_log/
 tool_list.yml
 tools.selected.json
 tool_list.metadata.json

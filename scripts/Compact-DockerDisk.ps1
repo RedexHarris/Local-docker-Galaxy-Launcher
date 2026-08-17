@@ -163,15 +163,28 @@ function Stop-DockerDesktopProcesses {
         "vpnkit-bridge"
     )
 
-    $processes = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $processNames -contains $_.ProcessName })
+    Write-Step "Checking Docker Desktop user processes."
+    $processes = @()
+    foreach ($processName in $processNames) {
+        try {
+            $processes += @(Get-Process -Name $processName -ErrorAction SilentlyContinue)
+        } catch {
+            Write-Step "Could not query process ${processName}: $($_.Exception.Message)"
+        }
+    }
+    $processes = @($processes | Sort-Object Id -Unique)
     if (-not $processes) {
         Write-Step "No Docker Desktop user processes were found."
         return
     }
 
     foreach ($process in $processes) {
-        Write-Step "Stopping process $($process.ProcessName) (PID $($process.Id))."
-        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        try {
+            Write-Step "Stopping process $($process.ProcessName) (PID $($process.Id))."
+            Stop-Process -Id $process.Id -Force -ErrorAction Stop
+        } catch {
+            Write-Step "Could not stop process $($process.ProcessName) (PID $($process.Id)): $($_.Exception.Message)"
+        }
     }
 }
 
@@ -346,6 +359,7 @@ if ($DryRun) {
     if (Get-Command wsl.exe -ErrorAction SilentlyContinue) {
         Invoke-Native -File "wsl.exe" -Arguments @("--shutdown")
         Wait-WslStopped
+        Stop-DockerDesktopProcesses
         Start-Sleep -Seconds 5
     } else {
         Write-Step "wsl.exe was not found. Docker Desktop VHDX may still be mounted."
