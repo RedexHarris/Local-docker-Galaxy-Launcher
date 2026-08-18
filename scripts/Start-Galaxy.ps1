@@ -381,6 +381,83 @@ function Invoke-Compose {
     }
 }
 
+function Test-GalaxyRuntimeServices {
+    $script = @'
+set -eu
+state_dir=/export/galaxy/database/gravity
+if ! command -v galaxyctl >/dev/null 2>&1; then
+    exit 1
+fi
+status="$(galaxyctl --state-dir "$state_dir" status 2>&1 || true)"
+printf '%s\n' "$status" | grep -Eq '^gunicorn[[:space:]]+RUNNING' || exit 1
+printf '%s\n' "$status" | grep -Eq '^handler:handler_0[[:space:]]+RUNNING' || exit 1
+printf '%s\n' "$status" | grep -Eq '^handler:handler_1[[:space:]]+RUNNING' || exit 1
+'@
+    return Test-NativeCommand -File "docker" -Arguments @("exec", $GalaxyContainerName, "bash", "-lc", $script)
+}
+
+function Repair-GalaxyRuntimeServices {
+    $script = @'
+set -eu
+state_dir=/export/galaxy/database/gravity
+status="$(galaxyctl --state-dir "$state_dir" status 2>&1 || true)"
+printf '%s\n' "$status"
+if printf '%s\n' "$status" | grep -Eqi 'supervisord is not running|refused connection|connection refused|no such file'; then
+    echo "Removing stale Galaxy Gravity supervisor pid/socket."
+    rm -f /tmp/galaxy_supervisord.sock "$state_dir/supervisor/supervisord.pid"
+fi
+galaxyctl --config-file /etc/galaxy/gravity.yml --state-dir "$state_dir" start
+'@
+    Invoke-LoggedCommand -File "docker" -Arguments @("exec", $GalaxyContainerName, "bash", "-lc", $script)
+}
+
+function Ensure-GalaxyRuntimeServices {
+    Set-Status "Checking Galaxy runtime services..."
+    for ($i = 1; $i -le 12; $i++) {
+        if (Test-GalaxyRuntimeServices) {
+            Set-Status "Galaxy runtime services are running."
+            return
+        }
+        if (($i % 3) -eq 0) {
+            Set-Status "Waiting for Galaxy runtime services... ($([int]($i * 5))s)"
+        }
+        Start-Sleep -Seconds 5
+        if ($script:Form) {
+            [System.Windows.Forms.Application]::DoEvents()
+        }
+    }
+
+    Set-Status "Repairing Galaxy runtime services..."
+    Repair-GalaxyRuntimeServices
+    for ($i = 1; $i -le 36; $i++) {
+        if (Test-GalaxyRuntimeServices) {
+            Set-Status "Galaxy runtime services are running."
+            return
+        }
+        if (($i % 6) -eq 0) {
+            Set-Status "Waiting for repaired Galaxy services... ($([int]($i * 5))s)"
+        }
+        Start-Sleep -Seconds 5
+        if ($script:Form) {
+            [System.Windows.Forms.Application]::DoEvents()
+        }
+    }
+
+    Add-Log "Galaxy runtime services did not become ready. Current Gravity status follows."
+    try {
+        Invoke-LoggedCommand -File "docker" -Arguments @(
+            "exec",
+            $GalaxyContainerName,
+            "bash",
+            "-lc",
+            "galaxyctl --state-dir /export/galaxy/database/gravity status 2>&1 || true"
+        )
+    } catch {
+        Add-Log $_.Exception.Message
+    }
+    throw "Galaxy runtime services did not become ready. Jobs may remain queued."
+}
+
 function Test-DockerImage {
     param([string]$ImageName)
 
@@ -589,6 +666,7 @@ function Start-Galaxy {
         Set-Status "Starting Galaxy without rebuilding the image..."
         Invoke-Compose @("up", "-d", "--no-build")
         Update-ContainerStatus
+        Ensure-GalaxyRuntimeServices
         Wait-GalaxyReady
         Sync-SelectedToolsIfNeeded
         Open-Galaxy
@@ -648,6 +726,7 @@ function Clear-GalaxyData {
         Set-Status "Starting Galaxy for data cleanup..."
         Invoke-Compose @("up", "-d", "--no-build")
         Update-ContainerStatus
+        Ensure-GalaxyRuntimeServices
         Wait-GalaxyReady
 
         Set-Status "Clearing Galaxy histories, jobs, and files..."
@@ -738,6 +817,7 @@ Continue?
         try {
             Ensure-DockerReady
             Invoke-Compose @("up", "-d", "--no-build")
+            Ensure-GalaxyRuntimeServices
             Wait-GalaxyReady
             Update-ContainerStatus
             Set-Status "Compact disk failed, but Galaxy was restarted."
