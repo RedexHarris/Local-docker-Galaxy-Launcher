@@ -291,15 +291,30 @@ function Test-NativeCommand {
         [string[]]$Arguments = @()
     )
 
-    $previousErrorActionPreference = $ErrorActionPreference
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $File
+    $startInfo.Arguments = (($Arguments | ForEach-Object { ConvertTo-ProcessArgument -Value ([string]$_) }) -join " ")
+    $startInfo.WorkingDirectory = (Get-Location).Path
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
     try {
-        $ErrorActionPreference = "Continue"
-        & $File @Arguments *> $null
-        $exitCode = $LASTEXITCODE
+        if (-not $process.Start()) {
+            return $false
+        }
+        [void]$process.StandardOutput.ReadToEnd()
+        [void]$process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        $exitCode = $process.ExitCode
     } catch {
         $exitCode = 1
     } finally {
-        $ErrorActionPreference = $previousErrorActionPreference
+        $process.Dispose()
     }
     return ($exitCode -eq 0)
 }
@@ -383,7 +398,7 @@ function Invoke-Compose {
 
 function Test-GalaxyRuntimeServices {
     $script = @'
-set -eu
+set -u
 state_dir=/export/galaxy/database/gravity
 if ! command -v galaxyctl >/dev/null 2>&1; then
     exit 1
@@ -391,6 +406,18 @@ fi
 status="$(galaxyctl --state-dir "$state_dir" status 2>&1 || true)"
 printf '%s\n' "$status" | grep -Eq '^handler:handler_0[[:space:]]+RUNNING' || exit 1
 printf '%s\n' "$status" | grep -Eq '^handler:handler_1[[:space:]]+RUNNING' || exit 1
+if command -v sinfo >/dev/null 2>&1; then
+    sinfo -N -h -o "%T" 2>/dev/null | awk '
+        BEGIN { ok = 0 }
+        {
+            state = tolower($0)
+            if (state ~ /(idle|alloc|mix|completing)/ && state !~ /(down|drain|fail|unknown)/) {
+                ok = 1
+            }
+        }
+        END { exit ok ? 0 : 1 }
+    ' || exit 1
+fi
 '@
     return Test-NativeCommand -File "docker" -Arguments @("exec", $GalaxyContainerName, "bash", "-lc", $script)
 }
@@ -409,24 +436,62 @@ handlers_ready() {
     printf '%s\n' "$1" | grep -Eq '^handler:handler_1[[:space:]]+RUNNING'
 }
 
+slurm_node_ready() {
+    if ! command -v sinfo >/dev/null 2>&1; then
+        return 0
+    fi
+    sinfo -N -h -o "%T" 2>/dev/null | awk '
+        BEGIN { ok = 0 }
+        {
+            state = tolower($0)
+            if (state ~ /(idle|alloc|mix|completing)/ && state !~ /(down|drain|fail|unknown)/) {
+                ok = 1
+            }
+        }
+        END { exit ok ? 0 : 1 }
+    '
+}
+
+repair_slurm_node() {
+    if ! command -v sinfo >/dev/null 2>&1 || ! command -v scontrol >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo "Current Slurm node state:"
+    sinfo -N -h -o "%N:%T:%E" 2>&1 || true
+    if slurm_node_ready; then
+        echo "Slurm node is schedulable."
+        return 0
+    fi
+
+    node_name="$(hostname)"
+    echo "Resuming Slurm node ${node_name}."
+    scontrol update NodeName="$node_name" State=IDLE Reason=LocalGalaxyLauncherRecovery 2>&1 || true
+    sleep 2
+
+    echo "Slurm node state after resume:"
+    sinfo -N -h -o "%N:%T:%E" 2>&1 || true
+}
+
 status="$(galaxyctl --state-dir "$state_dir" status 2>&1 || true)"
 printf '%s\n' "$status"
 if handlers_ready "$status"; then
     echo "Galaxy job handlers are already running."
-    exit 0
+else
+    if printf '%s\n' "$status" | grep -Eqi 'supervisord is not running|refused connection|connection refused|no such file'; then
+        echo "Removing stale Galaxy Gravity supervisor pid/socket."
+        rm -f /tmp/galaxy_supervisord.sock "$state_dir/supervisor/supervisord.pid"
+    fi
+
+    start_output="$(galaxyctl --config-file /etc/galaxy/gravity.yml --state-dir "$state_dir" start 2>&1)"
+    start_exit=$?
+    printf '%s\n' "$start_output"
+    if [ "$start_exit" -ne 0 ]; then
+        echo "galaxyctl start returned exit code $start_exit; continuing to recheck job handlers."
+    fi
 fi
 
-if printf '%s\n' "$status" | grep -Eqi 'supervisord is not running|refused connection|connection refused|no such file'; then
-    echo "Removing stale Galaxy Gravity supervisor pid/socket."
-    rm -f /tmp/galaxy_supervisord.sock "$state_dir/supervisor/supervisord.pid"
-fi
-
-start_output="$(galaxyctl --config-file /etc/galaxy/gravity.yml --state-dir "$state_dir" start 2>&1)"
-start_exit=$?
-printf '%s\n' "$start_output"
-if [ "$start_exit" -ne 0 ]; then
-    echo "galaxyctl start returned exit code $start_exit; continuing to recheck job handlers."
-fi
+repair_slurm_node
 
 status="$(galaxyctl --state-dir "$state_dir" status 2>&1 || true)"
 printf '%s\n' "$status"
@@ -435,14 +500,14 @@ printf '%s\n' "$status"
 }
 
 function Ensure-GalaxyRuntimeServices {
-    Set-Status "Checking Galaxy job handlers..."
+    Set-Status "Checking Galaxy job handlers and Slurm..."
     for ($i = 1; $i -le 12; $i++) {
         if (Test-GalaxyRuntimeServices) {
-            Set-Status "Galaxy job handlers are running."
+            Set-Status "Galaxy job handlers and Slurm are ready."
             return
         }
         if (($i % 3) -eq 0) {
-            Set-Status "Waiting for Galaxy job handlers... ($([int]($i * 5))s)"
+            Set-Status "Waiting for Galaxy job handlers and Slurm... ($([int]($i * 5))s)"
         }
         Start-Sleep -Seconds 5
         if ($script:Form) {
@@ -450,15 +515,15 @@ function Ensure-GalaxyRuntimeServices {
         }
     }
 
-    Set-Status "Repairing Galaxy job handlers..."
+    Set-Status "Repairing Galaxy job handlers and Slurm..."
     Repair-GalaxyRuntimeServices
     for ($i = 1; $i -le 36; $i++) {
         if (Test-GalaxyRuntimeServices) {
-            Set-Status "Galaxy job handlers are running."
+            Set-Status "Galaxy job handlers and Slurm are ready."
             return
         }
         if (($i % 6) -eq 0) {
-            Set-Status "Waiting for repaired Galaxy job handlers... ($([int]($i * 5))s)"
+            Set-Status "Waiting for repaired Galaxy job handlers and Slurm... ($([int]($i * 5))s)"
         }
         Start-Sleep -Seconds 5
         if ($script:Form) {
@@ -466,19 +531,19 @@ function Ensure-GalaxyRuntimeServices {
         }
     }
 
-    Add-Log "Galaxy job handlers did not become ready. Current Gravity status follows."
+    Add-Log "Galaxy job handlers or Slurm did not become ready. Current status follows."
     try {
         Invoke-LoggedCommand -File "docker" -Arguments @(
             "exec",
             $GalaxyContainerName,
             "bash",
             "-lc",
-            "galaxyctl --state-dir /export/galaxy/database/gravity status 2>&1 || true"
+            "galaxyctl --state-dir /export/galaxy/database/gravity status 2>&1 || true; echo 'Slurm nodes:'; sinfo -N -h -o '%N:%T:%E' 2>&1 || true; echo 'Slurm queue:'; squeue -h -o '%i:%t:%R' 2>&1 || true"
         )
     } catch {
         Add-Log $_.Exception.Message
     }
-    throw "Galaxy job handlers did not become ready. Jobs may remain queued."
+    throw "Galaxy job handlers or Slurm did not become ready. Jobs may remain queued."
 }
 
 function Test-DockerImage {
