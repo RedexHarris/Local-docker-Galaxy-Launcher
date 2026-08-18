@@ -389,7 +389,6 @@ if ! command -v galaxyctl >/dev/null 2>&1; then
     exit 1
 fi
 status="$(galaxyctl --state-dir "$state_dir" status 2>&1 || true)"
-printf '%s\n' "$status" | grep -Eq '^gunicorn[[:space:]]+RUNNING' || exit 1
 printf '%s\n' "$status" | grep -Eq '^handler:handler_0[[:space:]]+RUNNING' || exit 1
 printf '%s\n' "$status" | grep -Eq '^handler:handler_1[[:space:]]+RUNNING' || exit 1
 '@
@@ -412,14 +411,14 @@ galaxyctl --config-file /etc/galaxy/gravity.yml --state-dir "$state_dir" start
 }
 
 function Ensure-GalaxyRuntimeServices {
-    Set-Status "Checking Galaxy runtime services..."
+    Set-Status "Checking Galaxy job handlers..."
     for ($i = 1; $i -le 12; $i++) {
         if (Test-GalaxyRuntimeServices) {
-            Set-Status "Galaxy runtime services are running."
+            Set-Status "Galaxy job handlers are running."
             return
         }
         if (($i % 3) -eq 0) {
-            Set-Status "Waiting for Galaxy runtime services... ($([int]($i * 5))s)"
+            Set-Status "Waiting for Galaxy job handlers... ($([int]($i * 5))s)"
         }
         Start-Sleep -Seconds 5
         if ($script:Form) {
@@ -427,15 +426,15 @@ function Ensure-GalaxyRuntimeServices {
         }
     }
 
-    Set-Status "Repairing Galaxy runtime services..."
+    Set-Status "Repairing Galaxy job handlers..."
     Repair-GalaxyRuntimeServices
     for ($i = 1; $i -le 36; $i++) {
         if (Test-GalaxyRuntimeServices) {
-            Set-Status "Galaxy runtime services are running."
+            Set-Status "Galaxy job handlers are running."
             return
         }
         if (($i % 6) -eq 0) {
-            Set-Status "Waiting for repaired Galaxy services... ($([int]($i * 5))s)"
+            Set-Status "Waiting for repaired Galaxy job handlers... ($([int]($i * 5))s)"
         }
         Start-Sleep -Seconds 5
         if ($script:Form) {
@@ -443,7 +442,7 @@ function Ensure-GalaxyRuntimeServices {
         }
     }
 
-    Add-Log "Galaxy runtime services did not become ready. Current Gravity status follows."
+    Add-Log "Galaxy job handlers did not become ready. Current Gravity status follows."
     try {
         Invoke-LoggedCommand -File "docker" -Arguments @(
             "exec",
@@ -455,7 +454,7 @@ function Ensure-GalaxyRuntimeServices {
     } catch {
         Add-Log $_.Exception.Message
     }
-    throw "Galaxy runtime services did not become ready. Jobs may remain queued."
+    throw "Galaxy job handlers did not become ready. Jobs may remain queued."
 }
 
 function Test-DockerImage {
