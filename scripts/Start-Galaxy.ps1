@@ -397,15 +397,39 @@ printf '%s\n' "$status" | grep -Eq '^handler:handler_1[[:space:]]+RUNNING' || ex
 
 function Repair-GalaxyRuntimeServices {
     $script = @'
-set -eu
+set -u
 state_dir=/export/galaxy/database/gravity
+if ! command -v galaxyctl >/dev/null 2>&1; then
+    echo "galaxyctl was not found in the container."
+    exit 1
+fi
+
+handlers_ready() {
+    printf '%s\n' "$1" | grep -Eq '^handler:handler_0[[:space:]]+RUNNING' &&
+    printf '%s\n' "$1" | grep -Eq '^handler:handler_1[[:space:]]+RUNNING'
+}
+
 status="$(galaxyctl --state-dir "$state_dir" status 2>&1 || true)"
 printf '%s\n' "$status"
+if handlers_ready "$status"; then
+    echo "Galaxy job handlers are already running."
+    exit 0
+fi
+
 if printf '%s\n' "$status" | grep -Eqi 'supervisord is not running|refused connection|connection refused|no such file'; then
     echo "Removing stale Galaxy Gravity supervisor pid/socket."
     rm -f /tmp/galaxy_supervisord.sock "$state_dir/supervisor/supervisord.pid"
 fi
-galaxyctl --config-file /etc/galaxy/gravity.yml --state-dir "$state_dir" start
+
+start_output="$(galaxyctl --config-file /etc/galaxy/gravity.yml --state-dir "$state_dir" start 2>&1)"
+start_exit=$?
+printf '%s\n' "$start_output"
+if [ "$start_exit" -ne 0 ]; then
+    echo "galaxyctl start returned exit code $start_exit; continuing to recheck job handlers."
+fi
+
+status="$(galaxyctl --state-dir "$state_dir" status 2>&1 || true)"
+printf '%s\n' "$status"
 '@
     Invoke-LoggedCommand -File "docker" -Arguments @("exec", $GalaxyContainerName, "bash", "-lc", $script)
 }
